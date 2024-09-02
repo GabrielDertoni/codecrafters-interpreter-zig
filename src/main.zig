@@ -543,19 +543,20 @@ pub fn print_tokenize_result(src: *const Source, result: Lexer.Result) !void {
 }
 
 const Unary = enum {
-    Neg,
+    neg,
+    not,
 };
 
 const Binary = enum {
-    Plus,
-    Minus,
-    Times,
-    Div,
-    Lt,
-    Leq,
-    Gt,
-    Geq,
-    Eq,
+    plus,
+    minus,
+    times,
+    div,
+    lt,
+    leq,
+    gt,
+    geq,
+    eq,
 };
 
 const Expr = union(enum) {
@@ -588,11 +589,14 @@ const Expr = union(enum) {
             .number => |value| try print_number(writer, value),
             .string => |value| try writer.print("{s}", .{value}),
             .group => |inner| try writer.print("(group {})", .{inner}),
+            .unary_op => |payload| {
+                const op = switch (payload.operator) {
+                    .neg => "-",
+                    .not => "!",
+                };
+                try writer.print("({s} {})", .{ op, payload.operand });
+            },
             else => @panic("unimplemented"),
-            // .unary_op => |payload| : struct {
-            //     operator: Unary,
-            //     operand: *Expr,
-            // },
             // .binary_op: struct {
             //     lhs: *Expr,
             //     operator: Binary,
@@ -642,14 +646,26 @@ const Parser = struct {
                 // .rbrace,
                 // .comma,
                 // .dot,
-                // .minus,
+                .minus => {
+                    self.advance();
+                    const operand = try self.parseExpr();
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .unary_op = .{ .operator = .neg, .operand = operand } };
+                    return expr;
+                },
                 // .plus,
                 // .semi,
                 // .star,
                 // .slash,
                 // .lt,
                 // .gt,
-                // .not,
+                .not => {
+                    self.advance();
+                    const operand = try self.parseExpr();
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .unary_op = .{ .operator = .not, .operand = operand } };
+                    return expr;
+                },
                 // .eq_eq,
                 // .not_eq,
                 // .leq,
