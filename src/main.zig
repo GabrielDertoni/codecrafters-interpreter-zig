@@ -309,14 +309,14 @@ const Lexer = struct {
         self.advance(); // Skip open quote
         while (true) {
             if (!self.hasNext()) {
-                self.report_error("Unexpected EOF", .{});
-                break;
+                self.report_error("Unterminated string.", .{});
+                return;
             }
             if (self.current() == '\\') {
                 self.advance();
                 if (!self.hasNext()) {
                     self.report_error("Invalid escape sequence, unexpected EOF", .{});
-                    break;
+                    return;
                 }
             } else if (self.current() == '"') {
                 self.advance();
@@ -434,12 +434,8 @@ fn Cow(comptime T: type) type {
 }
 
 fn unquote(string: []const u8, allocator: Allocator) Allocator.Error!Cow([]const u8) {
-    // assert(string.len >= 2 and string[0] == '"' and string[string.len - 1] == '"');
-    assert(string.len >= 1 and string[0] == '"');
-    var naive_unquoted = string[1..];
-    if (string.len >= 2 and string[string.len - 1] == '"') {
-        naive_unquoted = naive_unquoted[0 .. naive_unquoted.len - 1];
-    }
+    assert(string.len >= 2 and string[0] == '"' and string[string.len - 1] == '"');
+    var naive_unquoted = string[1 .. string.len - 1];
     if (std.mem.indexOfScalar(u8, naive_unquoted, '\\')) |next_escape| {
         var list = std.ArrayList(u8).init(allocator);
         try list.appendSlice(naive_unquoted[0..next_escape]);
