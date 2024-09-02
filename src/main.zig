@@ -390,7 +390,7 @@ const Lexer = struct {
             return;
         }
         self.advance();
-        while (true) {
+        while (self.hasNext()) {
             switch (self.current()) {
                 'a'...'z', 'A'...'Z', '0'...'9', '_' => self.advance(),
                 else => break,
