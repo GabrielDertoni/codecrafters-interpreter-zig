@@ -71,7 +71,7 @@ const TokenSpan = struct {
             .geq => "GREATER_EQUAL >= null",
             .assign => "EQUAL = null",
             .string => {
-                try writer.print("STIRNG {s} null", .{self.text});
+                try writer.print("STRING {s} null", .{self.text});
                 return;
             },
             .ident => {
