@@ -206,7 +206,7 @@ const Lexer = struct {
             else => {
                 // FIXME: remove from here
                 const position = self.src.computePositionFromOffset(self.offset);
-                std.io.getStdErr().writer().print("[line {d}] Error: Unexpected character: {c}\n", .{ position.line, c }) catch @panic("failed to write to stderr");
+                std.io.getStdErr().writer().print("[line {d}] Error: Unexpected character: {c}\n", .{ position.line, c }) catch unreachable;
                 self.advance();
                 self.erroed = true;
             },
@@ -229,13 +229,15 @@ const Lexer = struct {
         return self.src.contents[self.offset];
     }
 
-    fn peek(self: *const Self) u8 {
+    fn peek(self: *const Self) ?u8 {
         return self.peekN(1);
     }
 
-    fn peekN(self: *const Self, n: u32) u8 {
-        assert(self.offset + n < self.src.contents.len);
-        return self.src.contents[self.offset + n];
+    fn peekN(self: *const Self, n: u32) ?u8 {
+        return if (self.offset + n < self.src.contents.len)
+            self.src.contents[self.offset + n]
+        else
+            null;
     }
 
     fn hasNext(self: *const Self) bool {
