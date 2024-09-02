@@ -9,10 +9,10 @@ const TokenKind = enum {
     lbrace,
     rbrace,
     comma,
+    semi,
     dot,
     minus,
     plus,
-    semi,
     star,
     slash,
     lt,
@@ -557,6 +557,15 @@ const Binary = enum {
     gt,
     geq,
     eq,
+    neq,
+
+    fn getPrecedence(self: Binary) u8 {
+        return switch (self) {
+            .lt, .leq, .gt, .geq, .eq, .neq => 1,
+            .plus, .minus => 2,
+            .times, .div => 3,
+        };
+    }
 };
 
 const Expr = union(enum) {
@@ -566,12 +575,12 @@ const Expr = union(enum) {
     string: []const u8,
     group: *Expr,
     unary_op: struct {
-        operator: Unary,
+        op: Unary,
         operand: *Expr,
     },
     binary_op: struct {
         lhs: *Expr,
-        operator: Binary,
+        op: Binary,
         rhs: *Expr,
     },
 
@@ -590,18 +599,27 @@ const Expr = union(enum) {
             .string => |value| try writer.print("{s}", .{value}),
             .group => |inner| try writer.print("(group {})", .{inner}),
             .unary_op => |payload| {
-                const op = switch (payload.operator) {
+                const op = switch (payload.op) {
                     .neg => "-",
                     .not => "!",
                 };
                 try writer.print("({s} {})", .{ op, payload.operand });
             },
-            else => @panic("unimplemented"),
-            // .binary_op: struct {
-            //     lhs: *Expr,
-            //     operator: Binary,
-            //     rhs: *Expr,
-            // },
+            .binary_op => |payload| {
+                const op = switch (payload.op) {
+                    .plus => "+",
+                    .minus => "-",
+                    .times => "*",
+                    .div => "/",
+                    .lt => "<",
+                    .leq => "<=",
+                    .gt => ">",
+                    .geq => ">=",
+                    .eq => "==",
+                    .neq => "!=",
+                };
+                try writer.print("({s} {} {})", .{ op, payload.lhs, payload.rhs });
+            },
         }
     }
 };
@@ -625,16 +643,51 @@ const Parser = struct {
             .allocator = allocator,
             .index = 0,
         };
+        self.skipCommentsAndWhitespace();
 
-        return self.parseExpr();
+        return self.parseExpr(0);
     }
 
-    fn parseExpr(self: *Self) Allocator.Error!*Expr {
+    fn parseExpr(self: *Self, min_prec: u8) Allocator.Error!*Expr {
+        var lhs = try self.parseAtom();
+        while (true) {
+            const op: Binary = switch (self.current()) {
+                .minus => .minus,
+                .plus => .plus,
+                .star => .times,
+                .slash => .div,
+                .lt => .lt,
+                .gt => .gt,
+                .eq_eq => .eq,
+                .not_eq => .neq,
+                .leq => .leq,
+                .geq => .geq,
+                .eof => break,
+                .comment, .whitespace => unreachable,
+                else => @panic("expected binary operator"),
+            };
+
+            const prec = op.getPrecedence();
+            if (prec < min_prec) {
+                break;
+            }
+
+            self.advance();
+            const rhs = try self.parseExpr(min_prec + 1);
+            const expr = try self.allocator.create(Expr);
+            expr.* = Expr{ .binary_op = .{ .lhs = lhs, .op = op, .rhs = rhs } };
+            lhs = expr;
+        }
+
+        return lhs;
+    }
+
+    fn parseAtom(self: *Self) Allocator.Error!*Expr {
         while (true) {
             switch (self.current()) {
                 .lparen => {
                     self.advance();
-                    const inner = try self.parseExpr();
+                    const inner = try self.parseExpr(0);
                     assert(self.current() == .rparen);
                     self.advance();
                     const expr = try self.allocator.create(Expr);
@@ -648,9 +701,9 @@ const Parser = struct {
                 // .dot,
                 .minus => {
                     self.advance();
-                    const operand = try self.parseExpr();
+                    const operand = try self.parseAtom();
                     const expr = try self.allocator.create(Expr);
-                    expr.* = Expr{ .unary_op = .{ .operator = .neg, .operand = operand } };
+                    expr.* = Expr{ .unary_op = .{ .op = .neg, .operand = operand } };
                     return expr;
                 },
                 // .plus,
@@ -661,9 +714,9 @@ const Parser = struct {
                 // .gt,
                 .not => {
                     self.advance();
-                    const operand = try self.parseExpr();
+                    const operand = try self.parseAtom();
                     const expr = try self.allocator.create(Expr);
-                    expr.* = Expr{ .unary_op = .{ .operator = .not, .operand = operand } };
+                    expr.* = Expr{ .unary_op = .{ .op = .not, .operand = operand } };
                     return expr;
                 },
                 // .eq_eq,
@@ -720,7 +773,8 @@ const Parser = struct {
                 // .keyword_var,
                 // .keyword_while,
 
-                .whitespace, .comment, .eof => continue,
+                .comment, .whitespace => unreachable,
+                .eof => @panic("unexpected eof"),
 
                 else => @panic("not implemented"),
             }
@@ -730,6 +784,18 @@ const Parser = struct {
     fn advance(self: *Self) void {
         self.index += 1;
         assert(self.index <= self.tokens.len);
+        self.skipCommentsAndWhitespace();
+    }
+
+    fn skipCommentsAndWhitespace(self: *Self) void {
+        while (true) {
+            const tok = self.current();
+            if (tok != .comment and tok != .whitespace) {
+                break;
+            }
+            self.index += 1;
+            assert(self.index <= self.tokens.len);
+        }
     }
 
     fn current(self: *const Self) TokenKind {
