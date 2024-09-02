@@ -673,7 +673,7 @@ const Parser = struct {
             }
 
             self.advance();
-            const rhs = try self.parseExpr(min_prec + 1);
+            const rhs = try self.parseExpr(prec + 1);
             const expr = try self.allocator.create(Expr);
             expr.* = Expr{ .binary_op = .{ .lhs = lhs, .op = op, .rhs = rhs } };
             lhs = expr;
