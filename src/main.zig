@@ -248,8 +248,7 @@ const Lexer = struct {
     }
 
     fn nextToken(self: *Self) Allocator.Error!void {
-        const c = self.current();
-        switch (c) {
+        switch (self.current()) {
             '(' => try self.tokenizeSingle(.lparen),
             ')' => try self.tokenizeSingle(.rparen),
             '{' => try self.tokenizeSingle(.lbrace),
@@ -299,7 +298,7 @@ const Lexer = struct {
             '0'...'9' => try self.tokenizeNumber(),
             'a'...'z', 'A'...'Z', '_' => try self.tokenizeIdentOrKeyword(),
             ' ', '\n', '\r', '\t' => try self.tokenizeWhitespace(),
-            else => {
+            else => |c| {
                 self.report_error("Unexpected character: {c}", .{c});
                 self.advance();
             },
@@ -512,35 +511,22 @@ fn unquote(string: []const u8, allocator: Allocator) Allocator.Error!Cow([]const
     }
 }
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    var alloc = arena.allocator();
+const Command = enum {
+    tokenize,
+    parse,
 
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    std.debug.print("Logs from your program will appear here!\n", .{});
-
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
-
-    if (args.len < 3) {
-        std.debug.print("Usage: ./your_program.sh tokenize <filename>\n", .{});
-        std.process.exit(1);
+    pub fn parse(arg: []u8) error{UnknownCommand}!Command {
+        if (std.mem.eql(u8, arg, "tokenize")) {
+            return .tokenize;
+        }
+        if (std.mem.eql(u8, arg, "parse")) {
+            return .parse;
+        }
+        return error.UnknownCommand;
     }
+};
 
-    const command = args[1];
-    const filename = args[2];
-
-    if (!std.mem.eql(u8, command, "tokenize")) {
-        std.debug.print("Unknown command: {s}\n", .{command});
-        std.process.exit(1);
-    }
-
-    const src = try Source.load(filename, alloc);
-    defer alloc.free(src.contents);
-
-    const result = try Lexer.lex(&src, alloc);
-
+pub fn print_tokenize_result(src: *const Source, result: Lexer.Result) !void {
     var stdout = std.io.getStdOut().writer();
 
     for (0..result.tokens.len) |i| {
@@ -562,5 +548,202 @@ pub fn main() !void {
     try stdout.print("EOF  null\n", .{}); // Placeholder, remove this line when implementing the scanner
     if (result.erroed) {
         std.process.exit(65);
+    }
+}
+
+const Unary = enum {
+    Neg,
+};
+
+const Binary = enum {
+    Plus,
+    Minus,
+    Times,
+    Div,
+    Lt,
+    Leq,
+    Gt,
+    Geq,
+    Eq,
+};
+
+const Expr = union(enum) {
+    bool: bool,
+    nil,
+    number: f64,
+    string: []const u8,
+    group: *Expr,
+    unary_op: struct {
+        operator: Unary,
+        operand: *Expr,
+    },
+    binary_op: struct {
+        lhs: *Expr,
+        operator: Binary,
+        rhs: *Expr,
+    },
+
+    pub fn format(
+        self: Expr,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        switch (self) {
+            .nil => try writer.print("nil", .{}),
+            .bool => |value| try writer.print("{}", .{value}),
+            .number => |value| try writer.print("{d}", .{value}),
+            .string => |value| try writer.print("\"{s}\"", .{value}),
+            .group => |inner| try inner.format(fmt, options, writer),
+            else => @panic("unimplemented"),
+            // .unary_op => |payload| : struct {
+            //     operator: Unary,
+            //     operand: *Expr,
+            // },
+            // .binary_op: struct {
+            //     lhs: *Expr,
+            //     operator: Binary,
+            //     rhs: *Expr,
+            // },
+        }
+    }
+};
+
+const Tree = struct {
+    root: Expr,
+};
+
+const Parser = struct {
+    tokens: *const Tokens,
+    allocator: Allocator,
+    index: usize,
+
+    const Self = @This();
+
+    pub fn parse(tokens: *const Tokens, allocator: Allocator) Allocator.Error!*Expr {
+        var self = Parser{
+            .tokens = tokens,
+            .allocator = allocator,
+            .index = 0,
+        };
+
+        while (self.hasNext()) {
+            switch (self.current()) {
+                // .lparen,
+                // .rparen,
+                // .lbrace,
+                // .rbrace,
+                // .comma,
+                // .dot,
+                // .minus,
+                // .plus,
+                // .semi,
+                // .star,
+                // .slash,
+                // .lt,
+                // .gt,
+                // .not,
+                // .eq_eq,
+                // .not_eq,
+                // .leq,
+                // .geq,
+                // .assign,
+                // .string,
+                // .ident,
+                // .number,
+
+                // .keyword_and,
+                // .keyword_class,
+                // .keyword_else,
+                // .keyword_for,
+                // .keyword_fun,
+                // .keyword_if,
+                .keyword_nil => {
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr.nil;
+                    return expr;
+                },
+                .keyword_false => {
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .bool = false };
+                    return expr;
+                },
+                .keyword_true => {
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .bool = true };
+                    return expr;
+                },
+                // .keyword_or,
+                // .keyword_print,
+                // .keyword_return,
+                // .keyword_super,
+                // .keyword_this,
+                // .keyword_var,
+                // .keyword_while,
+
+                .whitespace, .comment, .eof => {},
+
+                else => @panic("not implemented"),
+            }
+            self.advance();
+        }
+        unreachable;
+    }
+
+    fn advance(self: *Self) void {
+        self.index += 1;
+        assert(self.index <= self.tokens.len);
+    }
+
+    fn current(self: *const Self) TokenKind {
+        return self.tokens.items(.kind)[self.index];
+    }
+
+    fn hasNext(self: *const Self) bool {
+        return self.index < self.tokens.len;
+    }
+};
+
+pub fn print_parse_result(src: *const Source, result: Lexer.Result, allocator: Allocator) !void {
+    var stdout = std.io.getStdOut().writer();
+    if (result.erroed) {
+        return;
+    }
+    _ = src;
+    const expr = try Parser.parse(&result.tokens, allocator);
+    try stdout.print("{s}\n", .{expr});
+}
+
+pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    var alloc = arena.allocator();
+
+    // You can use print statements as follows for debugging, they'll be visible when running tests.
+    std.debug.print("Logs from your program will appear here!\n", .{});
+
+    const args = try std.process.argsAlloc(alloc);
+    defer std.process.argsFree(alloc, args);
+
+    if (args.len < 3) {
+        std.debug.print("Usage: ./your_program.sh tokenize <filename>\n", .{});
+        std.process.exit(1);
+    }
+
+    const filename = args[2];
+
+    const command = Command.parse(args[1]) catch {
+        std.debug.print("Unknown command: {s}\n", .{args[1]});
+        std.process.exit(1);
+    };
+
+    const src = try Source.load(filename, alloc);
+    defer alloc.free(src.contents);
+
+    const lex_result = try Lexer.lex(&src, alloc);
+
+    switch (command) {
+        .tokenize => try print_tokenize_result(&src, lex_result),
+        .parse => try print_parse_result(&src, lex_result, alloc),
     }
 }
