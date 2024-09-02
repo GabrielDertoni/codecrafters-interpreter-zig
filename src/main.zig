@@ -101,16 +101,7 @@ const TokenSpan = struct {
                 try writer.print("NUMBER {s} ", .{self.text});
 
                 const parsed = std.fmt.parseFloat(f64, self.text) catch unreachable;
-                // Little hack to make sure we print the '.0' at the end, even if it is an integral value.
-                // 4k should be enough, right?
-                var buf: [1 << 12]u8 = undefined;
-                const formatted = std.fmt.bufPrint(&buf, "{d}", .{parsed}) catch unreachable;
-                const hasDot = std.mem.indexOfScalar(u8, formatted, '.') != null;
-                if (!hasDot) {
-                    try writer.print("{d:.1}", .{parsed});
-                } else {
-                    try writer.print("{d}", .{parsed});
-                }
+                try print_number(writer, parsed);
                 return;
             },
 
@@ -592,7 +583,7 @@ const Expr = union(enum) {
         switch (self) {
             .nil => try writer.print("nil", .{}),
             .bool => |value| try writer.print("{}", .{value}),
-            .number => |value| try writer.print("{d}", .{value}),
+            .number => |value| try print_number(writer, value),
             .string => |value| try writer.print("\"{s}\"", .{value}),
             .group => |inner| try inner.format(fmt, options, writer),
             else => @panic("unimplemented"),
@@ -614,14 +605,16 @@ const Tree = struct {
 };
 
 const Parser = struct {
+    src: *const Source,
     tokens: *const Tokens,
     allocator: Allocator,
     index: usize,
 
     const Self = @This();
 
-    pub fn parse(tokens: *const Tokens, allocator: Allocator) Allocator.Error!*Expr {
+    pub fn parse(src: *const Source, tokens: *const Tokens, allocator: Allocator) Allocator.Error!*Expr {
         var self = Parser{
+            .src = src,
             .tokens = tokens,
             .allocator = allocator,
             .index = 0,
@@ -648,9 +641,20 @@ const Parser = struct {
                 // .leq,
                 // .geq,
                 // .assign,
-                // .string,
-                // .ident,
-                // .number,
+                .string => {
+                    // TODO: review me! Lifetimes might be confusing here
+                    const unquoted = try unquote(self.currentText(), self.allocator);
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .string = unquoted.value };
+                    return expr;
+                },
+                // .ident => {},
+                .number => {
+                    const parsed = std.fmt.parseFloat(f64, self.currentText()) catch @panic("should have already checked this");
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .number = parsed };
+                    return expr;
+                },
 
                 // .keyword_and,
                 // .keyword_class,
@@ -699,6 +703,14 @@ const Parser = struct {
         return self.tokens.items(.kind)[self.index];
     }
 
+    fn currentText(self: *const Self) []const u8 {
+        assert(self.index + 1 < self.tokens.len);
+        const offsets = self.tokens.items(.offset);
+        const start = offsets[self.index];
+        const end = offsets[self.index + 1];
+        return self.src.contents[start..end];
+    }
+
     fn hasNext(self: *const Self) bool {
         return self.index < self.tokens.len;
     }
@@ -709,8 +721,7 @@ pub fn print_parse_result(src: *const Source, result: Lexer.Result, allocator: A
     if (result.erroed) {
         return;
     }
-    _ = src;
-    const expr = try Parser.parse(&result.tokens, allocator);
+    const expr = try Parser.parse(src, &result.tokens, allocator);
     try stdout.print("{s}\n", .{expr});
 }
 
@@ -745,5 +756,18 @@ pub fn main() !void {
     switch (command) {
         .tokenize => try print_tokenize_result(&src, lex_result),
         .parse => try print_parse_result(&src, lex_result, alloc),
+    }
+}
+
+fn print_number(writer: anytype, number: f64) !void {
+    // Little hack to make sure we print the '.0' at the end, even if it is an integral value.
+    // 4k should be enough, right?
+    var buf: [1 << 12]u8 = undefined;
+    const formatted = std.fmt.bufPrint(&buf, "{d}", .{number}) catch unreachable;
+    const hasDot = std.mem.indexOfScalar(u8, formatted, '.') != null;
+    if (!hasDot) {
+        try writer.print("{d:.1}", .{number});
+    } else {
+        try writer.print("{d}", .{number});
     }
 }
