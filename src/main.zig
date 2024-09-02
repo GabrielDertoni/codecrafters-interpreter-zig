@@ -634,9 +634,16 @@ const Parser = struct {
     allocator: Allocator,
     index: usize,
 
+    const Error = error{
+        ExpectedExpression,
+        ExpectedBinaryOperator,
+        UnexpectedToken,
+        UnexpectedEof,
+    } || Allocator.Error;
+
     const Self = @This();
 
-    pub fn parse(src: *const Source, tokens: *const Tokens, allocator: Allocator) Allocator.Error!*Expr {
+    pub fn parse(src: *const Source, tokens: *const Tokens, allocator: Allocator) Error!*Expr {
         var self = Parser{
             .src = src,
             .tokens = tokens,
@@ -648,7 +655,7 @@ const Parser = struct {
         return self.parseExpr(0);
     }
 
-    fn parseExpr(self: *Self, min_prec: u8) Allocator.Error!*Expr {
+    fn parseExpr(self: *Self, min_prec: u8) Error!*Expr {
         var lhs = try self.parseAtom();
         while (true) {
             const op: Binary = switch (self.current()) {
@@ -664,7 +671,7 @@ const Parser = struct {
                 .geq => .geq,
                 .eof, .rparen => break,
                 .comment, .whitespace => unreachable,
-                else => @panic("expected binary operator"),
+                else => return error.ExpectedBinaryOperator,
             };
 
             const prec = op.getPrecedence();
@@ -682,7 +689,7 @@ const Parser = struct {
         return lhs;
     }
 
-    fn parseAtom(self: *Self) Allocator.Error!*Expr {
+    fn parseAtom(self: *Self) Error!*Expr {
         while (true) {
             switch (self.current()) {
                 .lparen => {
@@ -774,9 +781,9 @@ const Parser = struct {
                 // .keyword_while,
 
                 .comment, .whitespace => unreachable,
-                .eof => @panic("unexpected eof"),
+                .eof => return error.UnexpectedEof,
 
-                else => @panic("not implemented"),
+                else => return error.UnexpectedToken,
             }
         }
     }
@@ -821,7 +828,13 @@ pub fn print_parse_result(src: *const Source, result: Lexer.Result, allocator: A
         std.process.exit(65);
         return;
     }
-    const expr = try Parser.parse(src, &result.tokens, allocator);
+    const expr = Parser.parse(src, &result.tokens, allocator) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            // TODO: implement nice error messages
+            std.process.exit(65);
+        },
+    };
     try stdout.print("{s}\n", .{expr});
 }
 
