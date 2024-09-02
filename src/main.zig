@@ -52,7 +52,7 @@ const TokenKind = enum {
             .gt => "GREATER > null",
             .not => "NOT ! null",
             .eq_eq => "EQUAL_EQUAL == null",
-            .not_eq => "NOT_EQUAL != null",
+            .not_eq => "BANG_EQUAL != null",
             .leq => "LESS_EQUAL <= null",
             .geq => "GREATER_EQUAL >= null",
             .assign => "EQUAL = null",
