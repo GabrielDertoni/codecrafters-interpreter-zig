@@ -818,6 +818,7 @@ const Parser = struct {
 pub fn print_parse_result(src: *const Source, result: Lexer.Result, allocator: Allocator) !void {
     var stdout = std.io.getStdOut().writer();
     if (result.erroed) {
+        std.process.exit(65);
         return;
     }
     const expr = try Parser.parse(src, &result.tokens, allocator);
