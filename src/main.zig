@@ -580,12 +580,14 @@ const Expr = union(enum) {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        _ = fmt;
+        _ = options;
         switch (self) {
             .nil => try writer.print("nil", .{}),
             .bool => |value| try writer.print("{}", .{value}),
             .number => |value| try print_number(writer, value),
             .string => |value| try writer.print("{s}", .{value}),
-            .group => |inner| try inner.format(fmt, options, writer),
+            .group => |inner| try writer.print("(group {})", .{inner}),
             else => @panic("unimplemented"),
             // .unary_op => |payload| : struct {
             //     operator: Unary,
@@ -620,9 +622,21 @@ const Parser = struct {
             .index = 0,
         };
 
-        while (self.hasNext()) {
+        return self.parseExpr();
+    }
+
+    fn parseExpr(self: *Self) Allocator.Error!*Expr {
+        while (true) {
             switch (self.current()) {
-                // .lparen,
+                .lparen => {
+                    self.advance();
+                    const inner = try self.parseExpr();
+                    assert(self.current() == .rparen);
+                    self.advance();
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .group = inner };
+                    return expr;
+                },
                 // .rparen,
                 // .lbrace,
                 // .rbrace,
@@ -642,6 +656,7 @@ const Parser = struct {
                 // .geq,
                 // .assign,
                 .string => {
+                    defer self.advance();
                     // TODO: review me! Lifetimes might be confusing here
                     const unquoted = try unquote(self.currentText(), self.allocator);
                     const expr = try self.allocator.create(Expr);
@@ -650,6 +665,7 @@ const Parser = struct {
                 },
                 // .ident => {},
                 .number => {
+                    defer self.advance();
                     const parsed = std.fmt.parseFloat(f64, self.currentText()) catch @panic("should have already checked this");
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr{ .number = parsed };
@@ -663,16 +679,19 @@ const Parser = struct {
                 // .keyword_fun,
                 // .keyword_if,
                 .keyword_nil => {
+                    defer self.advance();
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr.nil;
                     return expr;
                 },
                 .keyword_false => {
+                    defer self.advance();
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr{ .bool = false };
                     return expr;
                 },
                 .keyword_true => {
+                    defer self.advance();
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr{ .bool = true };
                     return expr;
@@ -685,13 +704,11 @@ const Parser = struct {
                 // .keyword_var,
                 // .keyword_while,
 
-                .whitespace, .comment, .eof => {},
+                .whitespace, .comment, .eof => continue,
 
                 else => @panic("not implemented"),
             }
-            self.advance();
         }
-        unreachable;
     }
 
     fn advance(self: *Self) void {
