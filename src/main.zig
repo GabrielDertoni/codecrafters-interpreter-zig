@@ -413,7 +413,7 @@ const Lexer = struct {
         // FIXME: remove from here
         const position = self.src.computePositionFromOffset(self.offset);
         const msg = std.fmt.allocPrint(self.scratch, fmt, args) catch unreachable;
-        std.io.getStdErr().writer().print("[line {d}] Error {s}\n", .{ position.line, msg }) catch unreachable;
+        std.io.getStdErr().writer().print("[line {d}] Error: {s}\n", .{ position.line, msg }) catch unreachable;
         self.erroed = true;
     }
 };
