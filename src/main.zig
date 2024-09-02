@@ -27,6 +27,23 @@ const TokenKind = enum {
     ident,
     number,
 
+    keyword_and,
+    keyword_class,
+    keyword_else,
+    keyword_false,
+    keyword_for,
+    keyword_fun,
+    keyword_if,
+    keyword_nil,
+    keyword_or,
+    keyword_print,
+    keyword_return,
+    keyword_super,
+    keyword_this,
+    keyword_true,
+    keyword_var,
+    keyword_while,
+
     whitespace,
     comment,
     eof,
@@ -97,6 +114,23 @@ const TokenSpan = struct {
                 return;
             },
 
+            .keyword_and => "KEYWORD and null",
+            .keyword_class => "KEYWORD class null",
+            .keyword_else => "KEYWORD else null",
+            .keyword_false => "KEYWORD false null",
+            .keyword_for => "KEYWORD for null",
+            .keyword_fun => "KEYWORD fun null",
+            .keyword_if => "KEYWORD if null",
+            .keyword_nil => "KEYWORD nil null",
+            .keyword_or => "KEYWORD or null",
+            .keyword_print => "KEYWORD print null",
+            .keyword_return => "KEYWORD return null",
+            .keyword_super => "KEYWORD super null",
+            .keyword_this => "KEYWORD this null",
+            .keyword_true => "KEYWORD true null",
+            .keyword_var => "KEYWORD var null",
+            .keyword_while => "KEYWORD while null",
+
             .whitespace => "WHITESPACE   null",
             .comment => "COMMENT // null",
             .eof => "EOF  null",
@@ -156,6 +190,25 @@ const Position = struct {
     line: u32,
     column: u32,
 };
+
+const keywords = std.StaticStringMap(TokenKind).initComptime(.{
+    .{ "and", .keyword_and },
+    .{ "class", .keyword_class },
+    .{ "else", .keyword_else },
+    .{ "false", .keyword_false },
+    .{ "for", .keyword_for },
+    .{ "fun", .keyword_fun },
+    .{ "if", .keyword_if },
+    .{ "nil", .keyword_nil },
+    .{ "or", .keyword_or },
+    .{ "print", .keyword_print },
+    .{ "return", .keyword_return },
+    .{ "super", .keyword_super },
+    .{ "this", .keyword_this },
+    .{ "true", .keyword_true },
+    .{ "var", .keyword_var },
+    .{ "while", .keyword_while },
+});
 
 const Lexer = struct {
     src: *const Source,
@@ -244,7 +297,7 @@ const Lexer = struct {
             },
             '"' => try self.tokenizeString(),
             '0'...'9' => try self.tokenizeNumber(),
-            'a'...'z', 'A'...'Z', '_' => try self.tokenizeIdent(),
+            'a'...'z', 'A'...'Z', '_' => try self.tokenizeIdentOrKeyword(),
             ' ', '\n', '\r', '\t' => try self.tokenizeWhitespace(),
             else => {
                 self.report_error("Unexpected character: {c}", .{c});
@@ -334,11 +387,14 @@ const Lexer = struct {
         try self.addTokenStartingAt(.number, start);
     }
 
-    fn tokenizeIdent(self: *Self) Allocator.Error!void {
+    fn tokenizeIdentOrKeyword(self: *Self) Allocator.Error!void {
         assert(std.ascii.isAlphabetic(self.current()) or self.current() == '_');
         const start = self.offset;
         self.skipIdent();
-        try self.addTokenStartingAt(.ident, start);
+
+        const text = self.src.contents[start..self.offset];
+        const tok = keywords.get(text) orelse .ident;
+        try self.addTokenStartingAt(tok, start);
     }
 
     fn tokenizeWhitespace(self: *Self) Allocator.Error!void {
