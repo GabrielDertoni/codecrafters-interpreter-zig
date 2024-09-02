@@ -50,7 +50,7 @@ const TokenKind = enum {
             .slash => "SLASH / null",
             .lt => "LESS < null",
             .gt => "GREATER > null",
-            .not => "NOT ! null",
+            .not => "BANG ! null",
             .eq_eq => "EQUAL_EQUAL == null",
             .not_eq => "BANG_EQUAL != null",
             .leq => "LESS_EQUAL <= null",
