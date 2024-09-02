@@ -71,7 +71,9 @@ const TokenSpan = struct {
             .geq => "GREATER_EQUAL >= null",
             .assign => "EQUAL = null",
             .string => {
-                try writer.print("STRING {s} null", .{self.text});
+                const unquoted = unquote(self.text, std.heap.page_allocator) catch unreachable;
+                defer unquoted.deinit(std.heap.page_allocator);
+                try writer.print("STRING {s} {s}", .{ self.text, unquoted.value });
                 return;
             },
             .ident => {
@@ -416,8 +418,47 @@ const Lexer = struct {
     }
 };
 
+fn Cow(comptime T: type) type {
+    return struct {
+        is_owned: bool,
+        value: T,
+
+        const Self = @This();
+
+        fn deinit(self: *const Self, allocator: Allocator) void {
+            if (self.is_owned) {
+                allocator.free(self.value);
+            }
+        }
+    };
+}
+
+fn unquote(string: []const u8, allocator: Allocator) Allocator.Error!Cow([]const u8) {
+    assert(string.len >= 2 and string[0] == '"' and string[string.len - 1] == '"');
+    var naive_unquoted = string[1 .. string.len - 1];
+    if (std.mem.indexOfScalar(u8, naive_unquoted, '\\')) |next_escape| {
+        var list = std.ArrayList(u8).init(allocator);
+        try list.appendSlice(naive_unquoted[0..next_escape]);
+        var i = next_escape + 1;
+        // If this fails, we must have had an invalid escape sequence, which should not be
+        // possible at this point.
+        assert(i <= naive_unquoted.len);
+        while (std.mem.indexOfScalarPos(u8, naive_unquoted, i, '\\')) |esc| {
+            try list.appendSlice(naive_unquoted[i..esc]);
+            i = esc + 1;
+            // See reasoning above
+            assert(i <= naive_unquoted.len);
+        }
+        try list.appendSlice(naive_unquoted[i..]);
+        return Cow([]const u8){ .is_owned = true, .value = list.items };
+    } else {
+        return Cow([]const u8){ .is_owned = false, .value = naive_unquoted };
+    }
+}
+
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
     var alloc = arena.allocator();
 
     // You can use print statements as follows for debugging, they'll be visible when running tests.
