@@ -23,12 +23,26 @@ const TokenKind = enum {
     leq,
     geq,
     assign,
+    string,
+    ident,
+    number,
 
     whitespace,
     comment,
+    eof,
+};
+
+const Token = struct {
+    kind: TokenKind,
+    offset: u32,
+};
+
+const TokenSpan = struct {
+    kind: TokenKind,
+    text: []const u8,
 
     pub fn format(
-        self: TokenKind,
+        self: TokenSpan,
         comptime fmt: []const u8,
         options: std.fmt.FormatOptions,
         writer: anytype,
@@ -36,7 +50,7 @@ const TokenKind = enum {
         _ = fmt;
         _ = options;
 
-        const str = switch (self) {
+        const str = switch (self.kind) {
             .lparen => "LEFT_PAREN ( null",
             .rparen => "RIGHT_PAREN ) null",
             .lbrace => "LEFT_BRACE { null",
@@ -56,30 +70,50 @@ const TokenKind = enum {
             .leq => "LESS_EQUAL <= null",
             .geq => "GREATER_EQUAL >= null",
             .assign => "EQUAL = null",
+            .string => {
+                try writer.print("STIRNG {s} null", .{self.text});
+                return;
+            },
+            .ident => {
+                try writer.print("IDENTIFIER {s} null", .{self.text});
+                return;
+            },
+            .number => {
+                try writer.print("NUMBER {s} ", .{self.text});
+
+                const parsed = std.fmt.parseFloat(f64, self.text) catch unreachable;
+                // Little hack to make sure we print the '.0' at the end, even if it is an integral value.
+                // 4k should be enough, right?
+                var buf: [1 << 12]u8 = undefined;
+                const formatted = std.fmt.bufPrint(&buf, "{d}", .{parsed}) catch unreachable;
+                const hasDot = std.mem.indexOfScalar(u8, formatted, '.') != null;
+                if (!hasDot) {
+                    try writer.print("{d:.1}", .{parsed});
+                } else {
+                    try writer.print("{d}", .{parsed});
+                }
+                return;
+            },
 
             .whitespace => "WHITESPACE   null",
             .comment => "COMMENT // null",
+            .eof => "EOF  null",
         };
 
         try writer.print("{s}", .{str});
     }
 };
 
-const Token = struct {
-    kind: TokenKind,
-    offset: u32,
-};
-
 const Tokens = std.MultiArrayList(Token);
 
 // Lifetime of the program
 const Source = struct {
-    contents: []u8,
-    fname: []u8,
+    contents: []const u8,
+    fname: []const u8,
 
     const Self = @This();
 
-    pub fn load(fname: []u8, allocator: Allocator) !Source {
+    pub fn load(fname: []const u8, allocator: Allocator) !Source {
         const contents = try std.fs.cwd().readFileAlloc(allocator, fname, std.math.maxInt(u32));
         return Source{
             .contents = contents,
@@ -126,6 +160,7 @@ const Lexer = struct {
     offset: u32,
     tokens: Tokens,
     allocator: Allocator,
+    scratch: Allocator,
     erroed: bool,
 
     const Self = @This();
@@ -136,17 +171,20 @@ const Lexer = struct {
     };
 
     pub fn lex(src: *const Source, allocator: Allocator) Allocator.Error!Result {
+        var scratch = std.heap.stackFallback(1 << 13, std.heap.page_allocator);
         var self = Self{
             .src = src,
             .offset = 0,
             .tokens = Tokens{},
             .allocator = allocator,
+            .scratch = scratch.get(),
             .erroed = false,
         };
 
         while (self.offset < self.src.contents.len) {
             try self.nextToken();
         }
+        try self.addToken(.eof);
 
         return Result{
             .tokens = self.tokens,
@@ -202,13 +240,13 @@ const Lexer = struct {
                     try self.tokenizeSingle(.not);
                 }
             },
+            '"' => try self.tokenizeString(),
+            '0'...'9' => try self.tokenizeNumber(),
+            'a'...'z', 'A'...'Z', '_' => try self.tokenizeIdent(),
             ' ', '\n', '\r', '\t' => try self.tokenizeWhitespace(),
             else => {
-                // FIXME: remove from here
-                const position = self.src.computePositionFromOffset(self.offset);
-                std.io.getStdErr().writer().print("[line {d}] Error: Unexpected character: {c}\n", .{ position.line, c }) catch unreachable;
+                self.report_error("Error: Unexpected character: {c}", .{c});
                 self.advance();
-                self.erroed = true;
             },
         }
     }
@@ -263,6 +301,44 @@ const Lexer = struct {
         self.advanceBy(size);
     }
 
+    fn tokenizeString(self: *Self) Allocator.Error!void {
+        assert(self.current() == '"');
+        const start = self.offset;
+        self.advance(); // Skip open quote
+        while (true) {
+            if (!self.hasNext()) {
+                self.report_error("Unexpected EOF", .{});
+                break;
+            }
+            if (self.current() == '\\') {
+                self.advance();
+                if (!self.hasNext()) {
+                    self.report_error("Invalid escape sequence, unexpected EOF", .{});
+                    break;
+                }
+            } else if (self.current() == '"') {
+                self.advance();
+                break;
+            }
+            self.advance();
+        }
+        try self.addTokenStartingAt(.string, start);
+    }
+
+    fn tokenizeNumber(self: *Self) Allocator.Error!void {
+        assert(std.ascii.isDigit(self.current()));
+        const start = self.offset;
+        self.skipNumber();
+        try self.addTokenStartingAt(.number, start);
+    }
+
+    fn tokenizeIdent(self: *Self) Allocator.Error!void {
+        assert(std.ascii.isAlphabetic(self.current()) or self.current() == '_');
+        const start = self.offset;
+        self.skipIdent();
+        try self.addTokenStartingAt(.ident, start);
+    }
+
     fn tokenizeWhitespace(self: *Self) Allocator.Error!void {
         const start = self.offset;
         self.skipWhitespace();
@@ -293,6 +369,33 @@ const Lexer = struct {
         }
     }
 
+    fn skipNumber(self: *Self) void {
+        // Integral part
+        while (self.hasNext() and std.ascii.isDigit(self.current())) {
+            self.advance();
+        }
+        if (self.hasNext() and self.current() == '.') {
+            self.advance();
+            // Fractional part
+            while (self.hasNext() and std.ascii.isDigit(self.current())) {
+                self.advance();
+            }
+        }
+    }
+
+    fn skipIdent(self: *Self) void {
+        if (!(std.ascii.isAlphabetic(self.current()) or self.current() == '_')) {
+            return;
+        }
+        self.advance();
+        while (true) {
+            switch (self.current()) {
+                'a'...'z', 'A'...'Z', '0'...'9', '_' => self.advance(),
+                else => break,
+            }
+        }
+    }
+
     fn skipNewLine(self: *Self) void {
         if (self.current() == '\r') {
             self.advance();
@@ -302,6 +405,14 @@ const Lexer = struct {
         } else if (self.current() == '\n') {
             self.advance();
         }
+    }
+
+    fn report_error(self: *Self, comptime fmt: []const u8, args: anytype) void {
+        // FIXME: remove from here
+        const position = self.src.computePositionFromOffset(self.offset);
+        const msg = std.fmt.allocPrint(self.scratch, fmt, args) catch unreachable;
+        std.io.getStdErr().writer().print("[line {d}] {s}\n", .{ position.line, msg }) catch unreachable;
+        self.erroed = true;
     }
 };
 
@@ -336,11 +447,19 @@ pub fn main() !void {
     var stdout = std.io.getStdOut().writer();
 
     for (0..result.tokens.len) |i| {
-        const kind = result.tokens.items(.kind)[i];
-        if (kind == .whitespace or kind == .comment) {
+        const tok = result.tokens.get(i);
+        if (tok.kind == .whitespace or tok.kind == .comment) {
             continue;
         }
-        try stdout.print("{s}\n", .{kind});
+        if (tok.kind == .eof) {
+            break;
+        }
+        const end = result.tokens.items(.offset)[i + 1];
+        const tokenSpan = TokenSpan{
+            .kind = tok.kind,
+            .text = src.contents[tok.offset..end],
+        };
+        try stdout.print("{s}\n", .{tokenSpan});
     }
 
     try stdout.print("EOF  null\n", .{}); // Placeholder, remove this line when implementing the scanner
