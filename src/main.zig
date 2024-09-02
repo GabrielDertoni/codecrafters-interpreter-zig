@@ -126,22 +126,32 @@ const Lexer = struct {
     offset: u32,
     tokens: Tokens,
     allocator: Allocator,
+    erroed: bool,
 
     const Self = @This();
 
-    pub fn lex(src: *const Source, allocator: Allocator) Allocator.Error!Tokens {
+    const Result = struct {
+        tokens: Tokens,
+        erroed: bool,
+    };
+
+    pub fn lex(src: *const Source, allocator: Allocator) Allocator.Error!Result {
         var self = Self{
             .src = src,
             .offset = 0,
             .tokens = Tokens{},
             .allocator = allocator,
+            .erroed = false,
         };
 
         while (self.offset < self.src.contents.len) {
             try self.nextToken();
         }
 
-        return self.tokens;
+        return Result{
+            .tokens = self.tokens,
+            .erroed = self.erroed,
+        };
     }
 
     fn nextToken(self: *Self) Allocator.Error!void {
@@ -198,6 +208,7 @@ const Lexer = struct {
                 const position = self.src.computePositionFromOffset(self.offset);
                 std.io.getStdErr().writer().print("[line {d}] Error: Unexpected character: {c}\n", .{ position.line, c }) catch @panic("failed to write to stderr");
                 self.advance();
+                self.erroed = true;
             },
         }
     }
@@ -318,12 +329,12 @@ pub fn main() !void {
     const src = try Source.load(filename, alloc);
     defer alloc.free(src.contents);
 
-    const tokens = try Lexer.lex(&src, alloc);
+    const result = try Lexer.lex(&src, alloc);
 
     var stdout = std.io.getStdOut().writer();
 
-    for (0..tokens.len) |i| {
-        const kind = tokens.items(.kind)[i];
+    for (0..result.tokens.len) |i| {
+        const kind = result.tokens.items(.kind)[i];
         if (kind == .whitespace or kind == .comment) {
             continue;
         }
@@ -331,4 +342,7 @@ pub fn main() !void {
     }
 
     try stdout.print("EOF  null\n", .{}); // Placeholder, remove this line when implementing the scanner
+    if (result.erroed) {
+        std.process.exit(65);
+    }
 }
