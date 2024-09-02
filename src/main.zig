@@ -662,7 +662,7 @@ const Parser = struct {
                 .not_eq => .neq,
                 .leq => .leq,
                 .geq => .geq,
-                .eof => break,
+                .eof, .rparen => break,
                 .comment, .whitespace => unreachable,
                 else => @panic("expected binary operator"),
             };
