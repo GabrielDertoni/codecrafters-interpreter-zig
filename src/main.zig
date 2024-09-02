@@ -90,6 +90,35 @@ const Source = struct {
     pub fn unload(self: *Self, allocator: Allocator) void {
         allocator.free(self.contents);
     }
+
+    pub fn computePositionFromOffset(self: *const Self, offset: u32) Position {
+        assert(offset <= self.contents.len);
+        var line: u32 = 1;
+        var column: u32 = 1;
+        var i: usize = 0;
+        while (i < offset) {
+            const c = self.contents[i];
+            if (c == '\r' or c == '\n') {
+                if (c == '\r' and i + 1 < self.contents.len and self.contents[i + 1] == '\n') {
+                    i += 1;
+                }
+                line += 1;
+                column = 0;
+            }
+            column += 1;
+            i += 1;
+        }
+
+        return Position{
+            .line = line,
+            .column = column,
+        };
+    }
+};
+
+const Position = struct {
+    line: u32,
+    column: u32,
 };
 
 const Lexer = struct {
@@ -164,7 +193,12 @@ const Lexer = struct {
                 }
             },
             ' ', '\n', '\r', '\t' => try self.tokenizeWhitespace(),
-            else => std.debug.panic("Unknown token '{c}' ({d})", .{ c, c }),
+            else => {
+                // FIXME: remove from here
+                const position = self.src.computePositionFromOffset(self.offset);
+                std.io.getStdErr().writer().print("[line {d}] Error: Unexpected character: {c}\n", .{ position.line, c }) catch @panic("failed to write to stderr");
+                self.advance();
+            },
         }
     }
 
