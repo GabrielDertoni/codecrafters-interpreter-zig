@@ -572,6 +572,13 @@ const Binary = enum {
     }
 };
 
+const Stmt = union(enum) {
+    print: *Expr,
+    expr: *Expr,
+};
+
+const Stmts = std.ArrayList(Stmt);
+
 const Expr = union(enum) {
     nil,
     bool: bool,
@@ -628,10 +635,6 @@ const Expr = union(enum) {
     }
 };
 
-const Tree = struct {
-    root: Expr,
-};
-
 const Parser = struct {
     src: *const Source,
     tokens: *const Tokens,
@@ -641,13 +644,14 @@ const Parser = struct {
     const Error = error{
         ExpectedExpression,
         ExpectedBinaryOperator,
+        ExpectedSemi,
         UnexpectedToken,
         UnexpectedEof,
     } || Allocator.Error;
 
     const Self = @This();
 
-    pub fn parse(src: *const Source, tokens: *const Tokens, allocator: Allocator) Error!*Expr {
+    pub fn parse(src: *const Source, tokens: *const Tokens, allocator: Allocator) Error!Stmts {
         var self = Parser{
             .src = src,
             .tokens = tokens,
@@ -656,7 +660,39 @@ const Parser = struct {
         };
         self.skipCommentsAndWhitespace();
 
-        return self.parseExpr(0);
+        // TODO: should probably use a different allocator? This may cause way too much fragmentation
+        // because of vector resizes.
+        var stmts = Stmts.init(self.allocator);
+        while (self.hasNext()) {
+            if (self.current() == .eof) {
+                break;
+            }
+            const stmt = try self.parseStmt();
+            try stmts.append(stmt);
+        }
+
+        return stmts;
+    }
+
+    fn parseStmt(self: *Self) Error!Stmt {
+        switch (self.current()) {
+            .keyword_print => {
+                self.advance();
+                const expr = try self.parseExpr(0);
+                if (self.current() != .semi) {
+                    return error.ExpectedSemi;
+                }
+                self.advance();
+                return Stmt{ .print = expr };
+            },
+            else => {
+                const expr = try self.parseExpr(0);
+                if (self.current() != .semi) {
+                    return error.ExpectedSemi;
+                }
+                return Stmt{ .expr = expr };
+            },
+        }
     }
 
     fn parseExpr(self: *Self, min_prec: u8) Error!*Expr {
@@ -673,7 +709,7 @@ const Parser = struct {
                 .not_eq => .neq,
                 .leq => .leq,
                 .geq => .geq,
-                .eof, .rparen => break,
+                .eof, .rparen, .semi => break,
                 .comment, .whitespace => unreachable,
                 else => return error.ExpectedBinaryOperator,
             };
@@ -831,6 +867,7 @@ const Utf8StringSlice = []const u8;
 
 const RuntimeError = error{
     ValueError,
+    IoError,
 } || Allocator.Error;
 
 const Value = union(enum) {
@@ -887,7 +924,22 @@ const Value = union(enum) {
     }
 };
 
-pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
+pub fn evaluate(stmts: Stmts.Slice, allocator: Allocator) RuntimeError!void {
+    var stdout = std.io.getStdOut().writer();
+    for (stmts) |stmt| {
+        switch (stmt) {
+            .print => |expr| {
+                const value = try evaluateExpr(expr, allocator);
+                stdout.print("{}\n", .{value}) catch return error.IoError;
+            },
+            .expr => |expr| {
+                _ = try evaluateExpr(expr, allocator);
+            },
+        }
+    }
+}
+
+pub fn evaluateExpr(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
     return switch (expr.*) {
         .nil => Value.nil,
         .bool => |value| Value{ .bool = value },
@@ -897,9 +949,9 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
             try string.appendSlice(value);
             break :blk Value{ .string = string };
         },
-        .group => |inner| evaluate(inner, allocator),
+        .group => |inner| evaluateExpr(inner, allocator),
         .unary_op => |payload| blk: {
-            const inner = try evaluate(payload.operand, allocator);
+            const inner = try evaluateExpr(payload.operand, allocator);
             defer inner.deinit();
             break :blk switch (payload.op) {
                 .neg => Value{ .number = -(try inner.assertNumber()) },
@@ -913,9 +965,9 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
             };
         },
         .binary_op => |payload| blk: {
-            const lhs = try evaluate(payload.lhs, allocator);
+            const lhs = try evaluateExpr(payload.lhs, allocator);
             defer lhs.deinit();
-            const rhs = try evaluate(payload.rhs, allocator);
+            const rhs = try evaluateExpr(payload.rhs, allocator);
             defer rhs.deinit();
             break :blk switch (payload.op) {
                 .plus => switch (lhs) {
@@ -998,6 +1050,9 @@ pub fn main() !void {
     // You can use print statements as follows for debugging, they'll be visible when running tests.
     std.debug.print("Logs from your program will appear here!\n", .{});
 
+    var stdout = std.io.getStdOut().writer();
+    var stderr = std.io.getStdErr().writer();
+
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
 
@@ -1028,27 +1083,32 @@ pub fn main() !void {
     }
 
     const tokens = lex_result.tokens;
-    const expr = Parser.parse(&src, &tokens, alloc) catch |err| switch (err) {
+    const stmts = Parser.parse(&src, &tokens, alloc) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
+            stderr.print("{any}\n", .{err}) catch {};
             // TODO: implement nice error messages
             std.process.exit(65);
         },
     };
 
-    var stdout = std.io.getStdOut().writer();
     if (command == .parse) {
-        try stdout.print("{s}\n", .{expr});
+        for (stmts.items) |stmt| {
+            switch (stmt) {
+                .expr => |expr| try stdout.print("{s}\n", .{expr}),
+                else => continue,
+            }
+        }
         return;
     }
 
-    const value = evaluate(expr, alloc) catch |err| switch (err) {
-        error.ValueError => std.process.exit(70),
+    evaluate(stmts.items, alloc) catch |err| switch (err) {
+        error.ValueError => {
+            stderr.print("ValueError\n", .{}) catch {};
+            std.process.exit(70);
+        },
         else => return err,
     };
-    if (command == .evaluate) {
-        try stdout.print("{}\n", .{value});
-    }
 }
 
 fn print_number(writer: anytype, number: f64) !void {
