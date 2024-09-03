@@ -678,6 +678,17 @@ const Parser = struct {
         return stmts;
     }
 
+    pub fn parseSingleExpr(src: *const Source, tokens: *const Tokens, allocator: Allocator) Error!*Expr {
+        var self = Parser{
+            .src = src,
+            .tokens = tokens,
+            .allocator = allocator,
+            .index = 0,
+        };
+        self.skipCommentsAndWhitespace();
+        return self.parseExpr(0);
+    }
+
     fn parseStmt(self: *Self) Error!Stmt {
         switch (self.current()) {
             .keyword_print => {
@@ -1087,6 +1098,32 @@ pub fn main() !void {
     }
 
     const tokens = lex_result.tokens;
+
+    if (command == .parse or command == .evaluate) {
+        const expr = Parser.parseSingleExpr(&src, &tokens, alloc) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => {
+                stderr.print("{any}\n", .{err}) catch {};
+                // TODO: implement nice error messages
+                std.process.exit(65);
+            },
+        };
+
+        if (command == .parse) {
+            try stdout.print("{s}\n", .{expr});
+        } else {
+            const value = evaluate(expr, alloc) catch |err| switch (err) {
+                error.ValueError => {
+                    stderr.print("ValueError\n", .{}) catch {};
+                    std.process.exit(70);
+                },
+                else => return err,
+            };
+            try stdout.print("{}", .{value});
+        }
+        return;
+    }
+
     const stmts = Parser.parse(&src, &tokens, alloc) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
@@ -1095,34 +1132,6 @@ pub fn main() !void {
             std.process.exit(65);
         },
     };
-
-    if (command == .parse) {
-        for (stmts.items) |stmt| {
-            switch (stmt) {
-                .expr => |expr| try stdout.print("{s}\n", .{expr}),
-                else => continue,
-            }
-        }
-        return;
-    }
-
-    if (command == .evaluate) {
-        for (stmts.items) |stmt| {
-            switch (stmt) {
-                .expr => |expr| {
-                    const value = evaluate(expr, alloc) catch |err| switch (err) {
-                        error.ValueError => {
-                            stderr.print("ValueError\n", .{}) catch {};
-                            std.process.exit(70);
-                        },
-                        else => return err,
-                    };
-                    try stdout.print("{}", .{value});
-                },
-                else => continue,
-            }
-        }
-    }
 
     if (command == .run) {
         try run(stmts.items, alloc);
