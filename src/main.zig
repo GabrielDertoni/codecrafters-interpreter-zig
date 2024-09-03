@@ -933,25 +933,25 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
                 .div => Value{ .number = (try lhs.assertNumber()) / (try rhs.assertNumber()) },
                 .lt => switch (lhs) {
                     .number => |lhs_value| Value{ .bool = lhs_value < (try rhs.assertNumber()) },
-                    .bool => |lhs_value| Value{ .bool = !lhs_value and (try rhs.assertBool()) },
+                    .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lt) },
                     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()) == .lt },
                     .nil => return error.ValueError,
                 },
                 .leq => switch (lhs) {
                     .number => |lhs_value| Value{ .bool = lhs_value <= (try rhs.assertNumber()) },
-                    .bool => |lhs_value| Value{ .bool = !lhs_value or (try rhs.assertBool()) },
+                    .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lte) },
                     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.lte) },
                     .nil => return error.ValueError,
                 },
                 .gt => switch (lhs) {
                     .number => |lhs_value| Value{ .bool = lhs_value > (try rhs.assertNumber()) },
-                    .bool => |lhs_value| Value{ .bool = lhs_value and !(try rhs.assertBool()) },
+                    .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gt) },
                     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gt) },
                     .nil => return error.ValueError,
                 },
                 .geq => switch (lhs) {
                     .number => |lhs_value| Value{ .bool = lhs_value >= (try rhs.assertNumber()) },
-                    .bool => |lhs_value| Value{ .bool = lhs_value or !(try rhs.assertBool()) },
+                    .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gte) },
                     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gte) },
                     .nil => return error.ValueError,
                 },
@@ -978,6 +978,12 @@ fn evaluateEq(lhs: Value, rhs: Value) RuntimeError!bool {
         },
         .nil => return error.ValueError,
     };
+}
+
+fn compareBool(lhs: bool, rhs: bool) std.math.Order {
+    return if (lhs)
+        if (rhs) .eq else .gt
+    else if (rhs) .lt else .eq;
 }
 
 pub fn main() !void {
