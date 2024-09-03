@@ -841,21 +841,21 @@ const Value = union(enum) {
 
     const Self = @This();
 
-    fn assertNumber(self: Self) RuntimeError!f64 {
+    fn assertNumber(self: Self) error{ValueError}!f64 {
         return switch (self) {
             .number => |value| value,
             else => error.ValueError,
         };
     }
 
-    fn assertBool(self: Self) RuntimeError!bool {
+    fn assertBool(self: Self) error{ValueError}!bool {
         return switch (self) {
             .bool => |value| value,
             else => error.ValueError,
         };
     }
 
-    fn assertString(self: Self) RuntimeError!Utf8StringSlice {
+    fn assertString(self: Self) error{ValueError}!Utf8StringSlice {
         return switch (self) {
             .string => |value| value.items,
             else => error.ValueError,
@@ -955,20 +955,28 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
                     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gte) },
                     .nil => return error.ValueError,
                 },
-                .eq => switch (lhs) {
-                    .number => |lhs_value| Value{ .bool = std.math.approxEqAbs(f64, lhs_value, try rhs.assertNumber(), 1e-12) },
-                    .bool => |lhs_value| Value{ .bool = lhs_value == (try rhs.assertBool()) },
-                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.eq) },
-                    .nil => return error.ValueError,
-                },
-                .neq => switch (lhs) {
-                    .number => |lhs_value| Value{ .bool = !std.math.approxEqAbs(f64, lhs_value, try rhs.assertNumber(), 1e-12) },
-                    .bool => |lhs_value| Value{ .bool = lhs_value != (try rhs.assertBool()) },
-                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.neq) },
-                    .nil => return error.ValueError,
-                },
+                .eq => Value{ .bool = try evaluateEq(lhs, rhs) },
+                .neq => Value{ .bool = !try evaluateEq(lhs, rhs) },
             };
         },
+    };
+}
+
+fn evaluateEq(lhs: Value, rhs: Value) RuntimeError!bool {
+    return switch (lhs) {
+        .number => |lhs_value| switch (rhs) {
+            .number => |rhs_value| std.math.approxEqAbs(f64, lhs_value, rhs_value, 1e-12),
+            else => false,
+        },
+        .bool => |lhs_value| switch (rhs) {
+            .bool => |rhs_value| lhs_value == rhs_value,
+            else => false,
+        },
+        .string => |lhs_value| switch (rhs) {
+            .string => |rhs_value| std.mem.eql(u8, lhs_value.items, rhs_value.items),
+            else => false,
+        },
+        .nil => return error.ValueError,
     };
 }
 
