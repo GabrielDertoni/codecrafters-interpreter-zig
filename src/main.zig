@@ -148,6 +148,15 @@ const Source = struct {
         };
     }
 
+    pub fn loadStdin(allocator: Allocator) !Source {
+        var stdin = std.io.getStdIn().reader();
+        const contents = try stdin.readAllAlloc(allocator, std.math.maxInt(u32));
+        return Source{
+            .contents = contents,
+            .fname = "stdin",
+        };
+    }
+
     pub fn unload(self: *Self, allocator: Allocator) void {
         allocator.free(self.contents);
     }
@@ -693,6 +702,7 @@ const Parser = struct {
         ExpectedSemi,
         ExpectedIdent,
         ExpectedAssign,
+        ExpectedRParen,
         UnexpectedToken,
         UnexpectedEof,
     } || Allocator.Error;
@@ -823,7 +833,9 @@ const Parser = struct {
                 .lparen => {
                     self.advance();
                     const inner = try self.parseExpr(0);
-                    assert(self.current() == .rparen);
+                    if (self.current() != .rparen) {
+                        return error.ExpectedRParen;
+                    }
                     self.advance();
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr{ .group = inner };
@@ -1036,20 +1048,43 @@ const Value = union(enum) {
 
 const Env = struct {
     variables: std.AutoHashMap(Symbol, Value),
+
+    const Self = @This();
+
+    pub fn decl(self: *Self, sym: Symbol, value: Value) RuntimeError!void {
+        const result = try self.variables.getOrPut(sym);
+        if (result.found_existing) {
+            return error.VariableAlreadyDeclared;
+        }
+        result.value_ptr.* = value;
+    }
+
+    pub fn lookup(self: *const Self, sym: Symbol) RuntimeError!Value {
+        if (self.variables.getPtr(sym)) |value| {
+            return value.clone();
+        }
+        return error.VariableIsNotDeclared;
+    }
+};
+
+const Evaluator = struct {
+    env: Env,
     allocator: Allocator,
 
     const Self = @This();
 
     pub fn init(allocator: Allocator) Self {
         return Self{
-            .variables = std.AutoHashMap(Symbol, Value).init(allocator),
+            .env = Env{
+                .variables = std.AutoHashMap(Symbol, Value).init(allocator),
+            },
             .allocator = allocator,
         };
     }
 
     pub fn deinit(self: Self) void {
         var this = self;
-        this.variables.deinit();
+        this.env.variables.deinit();
     }
 
     pub fn run(self: *Self, stmts: Stmts.Slice) RuntimeError!void {
@@ -1065,11 +1100,7 @@ const Env = struct {
                 },
                 .var_decl => |payload| {
                     const value = try self.evaluate(payload.value);
-                    const result = try self.variables.getOrPut(payload.name);
-                    if (result.found_existing) {
-                        return error.VariableAlreadyDeclared;
-                    }
-                    result.value_ptr.* = value;
+                    try self.env.decl(payload.name, value);
                 },
             }
         }
@@ -1151,15 +1182,8 @@ const Env = struct {
                     .neq => Value{ .bool = !try evaluateEq(lhs, rhs) },
                 };
             },
-            .var_ref => |sym| try self.lookup(sym),
+            .var_ref => |sym| try self.env.lookup(sym),
         };
-    }
-
-    pub fn lookup(self: *Self, sym: Symbol) RuntimeError!Value {
-        if (self.variables.getPtr(sym)) |value| {
-            return value.clone();
-        }
-        return error.VariableIsNotDeclared;
     }
 };
 
@@ -1213,7 +1237,11 @@ pub fn main() !void {
         std.process.exit(1);
     };
 
-    const src = try Source.load(filename, alloc);
+    const src = if (std.mem.eql(u8, filename, "-"))
+        try Source.loadStdin(alloc)
+    else
+        try Source.load(filename, alloc);
+
     defer alloc.free(src.contents);
 
     const lex_result = try Lexer.lex(&src, alloc);
@@ -1242,7 +1270,7 @@ pub fn main() !void {
         if (command == .parse) {
             try stdout.print("{s}\n", .{expr});
         } else {
-            var env = Env.init(alloc);
+            var env = Evaluator.init(alloc);
             defer env.deinit();
             const value = env.evaluate(expr) catch |err| switch (err) {
                 error.ValueError => {
@@ -1266,7 +1294,7 @@ pub fn main() !void {
     };
 
     if (command == .run) {
-        var env = Env.init(alloc);
+        var env = Evaluator.init(alloc);
         defer env.deinit();
         env.run(stmts.items) catch |err| switch (err) {
             error.ValueError => {
