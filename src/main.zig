@@ -1032,7 +1032,10 @@ pub fn main() !void {
         return;
     }
 
-    const value = try evaluate(expr, alloc);
+    const value = evaluate(expr, alloc) catch |err| switch (err) {
+        error.ValueError => std.process.exit(70),
+        else => return err,
+    };
     if (command == .evaluate) {
         try stdout.print("{}\n", .{value});
     }
