@@ -506,6 +506,7 @@ const Command = enum {
     tokenize,
     parse,
     evaluate,
+    run,
 
     pub fn parse(arg: []u8) error{UnknownCommand}!Command {
         if (std.mem.eql(u8, arg, "tokenize")) {
@@ -516,6 +517,9 @@ const Command = enum {
         }
         if (std.mem.eql(u8, arg, "evaluate")) {
             return .evaluate;
+        }
+        if (std.mem.eql(u8, arg, "run")) {
+            return .run;
         }
         return error.UnknownCommand;
     }
@@ -924,22 +928,22 @@ const Value = union(enum) {
     }
 };
 
-pub fn evaluate(stmts: Stmts.Slice, allocator: Allocator) RuntimeError!void {
+pub fn run(stmts: Stmts.Slice, allocator: Allocator) RuntimeError!void {
     var stdout = std.io.getStdOut().writer();
     for (stmts) |stmt| {
         switch (stmt) {
             .print => |expr| {
-                const value = try evaluateExpr(expr, allocator);
+                const value = try evaluate(expr, allocator);
                 stdout.print("{}\n", .{value}) catch return error.IoError;
             },
             .expr => |expr| {
-                _ = try evaluateExpr(expr, allocator);
+                _ = try evaluate(expr, allocator);
             },
         }
     }
 }
 
-pub fn evaluateExpr(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
+pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
     return switch (expr.*) {
         .nil => Value.nil,
         .bool => |value| Value{ .bool = value },
@@ -949,9 +953,9 @@ pub fn evaluateExpr(expr: *const Expr, allocator: Allocator) RuntimeError!Value 
             try string.appendSlice(value);
             break :blk Value{ .string = string };
         },
-        .group => |inner| evaluateExpr(inner, allocator),
+        .group => |inner| evaluate(inner, allocator),
         .unary_op => |payload| blk: {
-            const inner = try evaluateExpr(payload.operand, allocator);
+            const inner = try evaluate(payload.operand, allocator);
             defer inner.deinit();
             break :blk switch (payload.op) {
                 .neg => Value{ .number = -(try inner.assertNumber()) },
@@ -965,9 +969,9 @@ pub fn evaluateExpr(expr: *const Expr, allocator: Allocator) RuntimeError!Value 
             };
         },
         .binary_op => |payload| blk: {
-            const lhs = try evaluateExpr(payload.lhs, allocator);
+            const lhs = try evaluate(payload.lhs, allocator);
             defer lhs.deinit();
-            const rhs = try evaluateExpr(payload.rhs, allocator);
+            const rhs = try evaluate(payload.rhs, allocator);
             defer rhs.deinit();
             break :blk switch (payload.op) {
                 .plus => switch (lhs) {
@@ -1102,13 +1106,27 @@ pub fn main() !void {
         return;
     }
 
-    evaluate(stmts.items, alloc) catch |err| switch (err) {
-        error.ValueError => {
-            stderr.print("ValueError\n", .{}) catch {};
-            std.process.exit(70);
-        },
-        else => return err,
-    };
+    if (command == .evaluate) {
+        for (stmts.items) |stmt| {
+            switch (stmt) {
+                .expr => |expr| {
+                    const value = evaluate(expr, alloc) catch |err| switch (err) {
+                        error.ValueError => {
+                            stderr.print("ValueError\n", .{}) catch {};
+                            std.process.exit(70);
+                        },
+                        else => return err,
+                    };
+                    try stdout.print("{}", .{value});
+                },
+                else => continue,
+            }
+        }
+    }
+
+    if (command == .run) {
+        try run(stmts.items, alloc);
+    }
 }
 
 fn print_number(writer: anytype, number: f64) !void {
