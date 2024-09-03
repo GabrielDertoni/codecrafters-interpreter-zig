@@ -918,7 +918,16 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
             const rhs = try evaluate(payload.rhs, allocator);
             defer rhs.deinit();
             break :blk switch (payload.op) {
-                .plus => Value{ .number = (try lhs.assertNumber()) + (try rhs.assertNumber()) },
+                .plus => switch (lhs) {
+                    .number => |lhs_value| Value{ .number = lhs_value + (try rhs.assertNumber()) },
+                    .string => |lhs_value| inner_blk: {
+                        var result = Utf8String.init(allocator);
+                        try result.appendSlice(lhs_value.items);
+                        try result.appendSlice(try rhs.assertString());
+                        break :inner_blk Value{ .string = result };
+                    },
+                    else => return error.ValueError,
+                },
                 .minus => Value{ .number = (try lhs.assertNumber()) - (try rhs.assertNumber()) },
                 .times => Value{ .number = (try lhs.assertNumber()) * (try rhs.assertNumber()) },
                 .div => Value{ .number = (try lhs.assertNumber()) / (try rhs.assertNumber()) },
