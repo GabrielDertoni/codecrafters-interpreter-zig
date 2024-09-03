@@ -705,6 +705,7 @@ const Parser = struct {
                 if (self.current() != .semi) {
                     return error.ExpectedSemi;
                 }
+                self.advance();
                 return Stmt{ .expr = expr };
             },
         }
