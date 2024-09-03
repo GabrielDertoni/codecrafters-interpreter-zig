@@ -579,7 +579,13 @@ const Binary = enum {
 const Stmt = union(enum) {
     print: *Expr,
     expr: *Expr,
+    var_decl: struct {
+        name: Symbol,
+        value: *Expr,
+    },
 };
+
+const Symbol = Interner.Index; // interned
 
 const Stmts = std.ArrayList(Stmt);
 
@@ -598,6 +604,7 @@ const Expr = union(enum) {
         op: Binary,
         rhs: *Expr,
     },
+    var_ref: Symbol,
 
     pub fn format(
         self: Expr,
@@ -635,7 +642,41 @@ const Expr = union(enum) {
                 };
                 try writer.print("({s} {} {})", .{ op, payload.lhs, payload.rhs });
             },
+            .var_ref => |index| {
+                try writer.print("_var_{}", .{index});
+            },
         }
+    }
+};
+
+const Interner = struct {
+    symbol_hash: std.StringHashMap(Index),
+    symbols: std.ArrayList([]const u8),
+
+    const Self = @This();
+    const Index = u32;
+
+    pub fn init(allocator: Allocator) Self {
+        return Self{
+            .symbol_hash = std.StringHashMap(Symbol).init(allocator),
+            .symbols = std.ArrayList([]const u8).init(allocator),
+        };
+    }
+
+    pub fn deinit(self: Self) void {
+        self.symbol_hash.deinit();
+        self.symbols.deinit();
+    }
+
+    pub fn internOrGet(self: *Self, string: []const u8) Allocator.Error!Index {
+        const result = try self.symbol_hash.getOrPut(string);
+        if (!result.found_existing) {
+            const index: Index = @intCast(self.symbols.items.len);
+            result.value_ptr.* = index;
+            try self.symbols.append(try self.symbols.allocator.dupe(u8, string));
+            return index;
+        }
+        return result.value_ptr.*;
     }
 };
 
@@ -643,12 +684,15 @@ const Parser = struct {
     src: *const Source,
     tokens: *const Tokens,
     allocator: Allocator,
+    interner: Interner,
     index: usize,
 
     const Error = error{
         ExpectedExpression,
         ExpectedBinaryOperator,
         ExpectedSemi,
+        ExpectedIdent,
+        ExpectedAssign,
         UnexpectedToken,
         UnexpectedEof,
     } || Allocator.Error;
@@ -660,6 +704,8 @@ const Parser = struct {
             .src = src,
             .tokens = tokens,
             .allocator = allocator,
+            // TODO: figure out if I have to deinitialize this
+            .interner = Interner.init(allocator),
             .index = 0,
         };
         self.skipCommentsAndWhitespace();
@@ -683,6 +729,8 @@ const Parser = struct {
             .src = src,
             .tokens = tokens,
             .allocator = allocator,
+            // TODO: figure out if I have to deinitialize this
+            .interner = Interner.init(allocator),
             .index = 0,
         };
         self.skipCommentsAndWhitespace();
@@ -700,6 +748,20 @@ const Parser = struct {
                 self.advance();
                 return Stmt{ .print = expr };
             },
+            .keyword_var => {
+                self.advance();
+                const name = try self.expectIdent();
+                if (self.current() != .assign) {
+                    return error.ExpectedAssign;
+                }
+                self.advance();
+                const value = try self.parseExpr(0);
+                if (self.current() != .semi) {
+                    return error.ExpectedSemi;
+                }
+                self.advance();
+                return Stmt{ .var_decl = .{ .name = name, .value = value } };
+            },
             else => {
                 const expr = try self.parseExpr(0);
                 if (self.current() != .semi) {
@@ -709,6 +771,16 @@ const Parser = struct {
                 return Stmt{ .expr = expr };
             },
         }
+    }
+
+    fn expectIdent(self: *Self) Error!Symbol {
+        if (self.current() != .ident) {
+            return error.ExpectedIdent;
+        }
+        const text = self.currentText();
+        const ident = self.interner.internOrGet(text);
+        self.advance();
+        return ident;
     }
 
     fn parseExpr(self: *Self, min_prec: u8) Error!*Expr {
@@ -795,12 +867,19 @@ const Parser = struct {
                     expr.* = Expr{ .string = unquoted.value };
                     return expr;
                 },
-                // .ident => {},
                 .number => {
                     defer self.advance();
                     const parsed = std.fmt.parseFloat(f64, self.currentText()) catch @panic("should have already checked this");
                     const expr = try self.allocator.create(Expr);
                     expr.* = Expr{ .number = parsed };
+                    return expr;
+                },
+                .ident => {
+                    defer self.advance();
+                    const text = self.currentText();
+                    const sym = try self.interner.internOrGet(text);
+                    const expr = try self.allocator.create(Expr);
+                    expr.* = Expr{ .var_ref = sym };
                     return expr;
                 },
 
@@ -884,6 +963,8 @@ const Utf8StringSlice = []const u8;
 const RuntimeError = error{
     ValueError,
     IoError,
+    VariableAlreadyDeclared,
+    VariableIsNotDeclared,
 } || Allocator.Error;
 
 const Value = union(enum) {
@@ -915,7 +996,20 @@ const Value = union(enum) {
         };
     }
 
-    fn deinit(self: Self) void {
+    // TODO: This should probably be garbage collected or ref-counted in the future
+    pub fn clone(self: *const Self) Allocator.Error!Self {
+        switch (self.*) {
+            .string => |value| {
+                var copy = Utf8String.init(value.allocator);
+                try copy.appendSlice(value.items);
+                return Self{ .string = copy };
+            },
+            // Memcpy will suffice.
+            .number, .bool, .nil => return self.*,
+        }
+    }
+
+    pub fn deinit(self: Self) void {
         switch (self) {
             .string => |value| value.deinit(),
             .number, .bool, .nil => {},
@@ -940,99 +1034,134 @@ const Value = union(enum) {
     }
 };
 
-pub fn run(stmts: Stmts.Slice, allocator: Allocator) RuntimeError!void {
-    var stdout = std.io.getStdOut().writer();
-    for (stmts) |stmt| {
-        switch (stmt) {
-            .print => |expr| {
-                const value = try evaluate(expr, allocator);
-                stdout.print("{}\n", .{value}) catch return error.IoError;
-            },
-            .expr => |expr| {
-                _ = try evaluate(expr, allocator);
-            },
+const Env = struct {
+    variables: std.AutoHashMap(Symbol, Value),
+    allocator: Allocator,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator) Self {
+        return Self{
+            .variables = std.AutoHashMap(Symbol, Value).init(allocator),
+            .allocator = allocator,
+        };
+    }
+
+    pub fn deinit(self: Self) void {
+        var this = self;
+        this.variables.deinit();
+    }
+
+    pub fn run(self: *Self, stmts: Stmts.Slice) RuntimeError!void {
+        var stdout = std.io.getStdOut().writer();
+        for (stmts) |stmt| {
+            switch (stmt) {
+                .print => |expr| {
+                    const value = try self.evaluate(expr);
+                    stdout.print("{}\n", .{value}) catch return error.IoError;
+                },
+                .expr => |expr| {
+                    _ = try self.evaluate(expr);
+                },
+                .var_decl => |payload| {
+                    const value = try self.evaluate(payload.value);
+                    const result = try self.variables.getOrPut(payload.name);
+                    if (result.found_existing) {
+                        return error.VariableAlreadyDeclared;
+                    }
+                    result.value_ptr.* = value;
+                },
+            }
         }
     }
-}
 
-pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
-    return switch (expr.*) {
-        .nil => Value.nil,
-        .bool => |value| Value{ .bool = value },
-        .number => |value| Value{ .number = value },
-        .string => |value| blk: {
-            var string = Utf8String.init(allocator);
-            try string.appendSlice(value);
-            break :blk Value{ .string = string };
-        },
-        .group => |inner| evaluate(inner, allocator),
-        .unary_op => |payload| blk: {
-            const inner = try evaluate(payload.operand, allocator);
-            defer inner.deinit();
-            break :blk switch (payload.op) {
-                .neg => Value{ .number = -(try inner.assertNumber()) },
-                .not => Value{
-                    .bool = switch (inner) {
-                        .nil => true, // nil is falsy
-                        .bool => |value| !value,
-                        else => false, // other stuff is truthy
+    pub fn evaluate(self: *Self, expr: *const Expr) RuntimeError!Value {
+        return switch (expr.*) {
+            .nil => Value.nil,
+            .bool => |value| Value{ .bool = value },
+            .number => |value| Value{ .number = value },
+            .string => |value| blk: {
+                var string = Utf8String.init(self.allocator);
+                try string.appendSlice(value);
+                break :blk Value{ .string = string };
+            },
+            .group => |inner| self.evaluate(inner),
+            .unary_op => |payload| blk: {
+                const inner = try self.evaluate(payload.operand);
+                defer inner.deinit();
+                break :blk switch (payload.op) {
+                    .neg => Value{ .number = -(try inner.assertNumber()) },
+                    .not => Value{
+                        .bool = switch (inner) {
+                            .nil => true, // nil is falsy
+                            .bool => |value| !value,
+                            else => false, // other stuff is truthy
+                        },
                     },
-                },
-            };
-        },
-        .binary_op => |payload| blk: {
-            const lhs = try evaluate(payload.lhs, allocator);
-            defer lhs.deinit();
-            const rhs = try evaluate(payload.rhs, allocator);
-            defer rhs.deinit();
-            break :blk switch (payload.op) {
-                .plus => switch (lhs) {
-                    .number => |lhs_value| Value{ .number = lhs_value + (try rhs.assertNumber()) },
-                    .string => |lhs_value| inner_blk: {
-                        var result = Utf8String.init(allocator);
-                        try result.appendSlice(lhs_value.items);
-                        try result.appendSlice(try rhs.assertString());
-                        break :inner_blk Value{ .string = result };
+                };
+            },
+            .binary_op => |payload| blk: {
+                const lhs = try self.evaluate(payload.lhs);
+                defer lhs.deinit();
+                const rhs = try self.evaluate(payload.rhs);
+                defer rhs.deinit();
+                break :blk switch (payload.op) {
+                    .plus => switch (lhs) {
+                        .number => |lhs_value| Value{ .number = lhs_value + (try rhs.assertNumber()) },
+                        .string => |lhs_value| inner_blk: {
+                            var result = Utf8String.init(self.allocator);
+                            try result.appendSlice(lhs_value.items);
+                            try result.appendSlice(try rhs.assertString());
+                            break :inner_blk Value{ .string = result };
+                        },
+                        else => return error.ValueError,
                     },
-                    else => return error.ValueError,
-                },
-                .minus => Value{ .number = (try lhs.assertNumber()) - (try rhs.assertNumber()) },
-                .times => Value{ .number = (try lhs.assertNumber()) * (try rhs.assertNumber()) },
-                .div => Value{ .number = (try lhs.assertNumber()) / (try rhs.assertNumber()) },
-                .lt => Value{ .bool = (try lhs.assertNumber()) < (try rhs.assertNumber()) },
-                .leq => Value{ .bool = (try lhs.assertNumber()) <= (try rhs.assertNumber()) },
-                .gt => Value{ .bool = (try lhs.assertNumber()) > (try rhs.assertNumber()) },
-                .geq => Value{ .bool = (try lhs.assertNumber()) >= (try rhs.assertNumber()) },
-                // .lt => switch (lhs) {
-                //     .number => |lhs_value| Value{ .bool = lhs_value < (try rhs.assertNumber()) },
-                //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lt) },
-                //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()) == .lt },
-                //     .nil => return error.ValueError,
-                // },
-                // .leq => switch (lhs) {
-                //     .number => |lhs_value| Value{ .bool = lhs_value <= (try rhs.assertNumber()) },
-                //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lte) },
-                //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.lte) },
-                //     .nil => return error.ValueError,
-                // },
-                // .gt => switch (lhs) {
-                //     .number => |lhs_value| Value{ .bool = lhs_value > (try rhs.assertNumber()) },
-                //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gt) },
-                //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gt) },
-                //     .nil => return error.ValueError,
-                // },
-                // .geq => switch (lhs) {
-                //     .number => |lhs_value| Value{ .bool = lhs_value >= (try rhs.assertNumber()) },
-                //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gte) },
-                //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gte) },
-                //     .nil => return error.ValueError,
-                // },
-                .eq => Value{ .bool = try evaluateEq(lhs, rhs) },
-                .neq => Value{ .bool = !try evaluateEq(lhs, rhs) },
-            };
-        },
-    };
-}
+                    .minus => Value{ .number = (try lhs.assertNumber()) - (try rhs.assertNumber()) },
+                    .times => Value{ .number = (try lhs.assertNumber()) * (try rhs.assertNumber()) },
+                    .div => Value{ .number = (try lhs.assertNumber()) / (try rhs.assertNumber()) },
+                    .lt => Value{ .bool = (try lhs.assertNumber()) < (try rhs.assertNumber()) },
+                    .leq => Value{ .bool = (try lhs.assertNumber()) <= (try rhs.assertNumber()) },
+                    .gt => Value{ .bool = (try lhs.assertNumber()) > (try rhs.assertNumber()) },
+                    .geq => Value{ .bool = (try lhs.assertNumber()) >= (try rhs.assertNumber()) },
+                    // .lt => switch (lhs) {
+                    //     .number => |lhs_value| Value{ .bool = lhs_value < (try rhs.assertNumber()) },
+                    //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lt) },
+                    //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()) == .lt },
+                    //     .nil => return error.ValueError,
+                    // },
+                    // .leq => switch (lhs) {
+                    //     .number => |lhs_value| Value{ .bool = lhs_value <= (try rhs.assertNumber()) },
+                    //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.lte) },
+                    //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.lte) },
+                    //     .nil => return error.ValueError,
+                    // },
+                    // .gt => switch (lhs) {
+                    //     .number => |lhs_value| Value{ .bool = lhs_value > (try rhs.assertNumber()) },
+                    //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gt) },
+                    //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gt) },
+                    //     .nil => return error.ValueError,
+                    // },
+                    // .geq => switch (lhs) {
+                    //     .number => |lhs_value| Value{ .bool = lhs_value >= (try rhs.assertNumber()) },
+                    //     .bool => |lhs_value| Value{ .bool = compareBool(lhs_value, try rhs.assertBool()).compare(.gte) },
+                    //     .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gte) },
+                    //     .nil => return error.ValueError,
+                    // },
+                    .eq => Value{ .bool = try evaluateEq(lhs, rhs) },
+                    .neq => Value{ .bool = !try evaluateEq(lhs, rhs) },
+                };
+            },
+            .var_ref => |sym| try self.lookup(sym),
+        };
+    }
+
+    pub fn lookup(self: *Self, sym: Symbol) RuntimeError!Value {
+        if (self.variables.getPtr(sym)) |value| {
+            return value.clone();
+        }
+        return error.VariableIsNotDeclared;
+    }
+};
 
 fn evaluateEq(lhs: Value, rhs: Value) RuntimeError!bool {
     return switch (lhs) {
@@ -1113,7 +1242,9 @@ pub fn main() !void {
         if (command == .parse) {
             try stdout.print("{s}\n", .{expr});
         } else {
-            const value = evaluate(expr, alloc) catch |err| switch (err) {
+            var env = Env.init(alloc);
+            defer env.deinit();
+            const value = env.evaluate(expr) catch |err| switch (err) {
                 error.ValueError => {
                     stderr.print("ValueError\n", .{}) catch {};
                     std.process.exit(70);
@@ -1135,7 +1266,9 @@ pub fn main() !void {
     };
 
     if (command == .run) {
-        run(stmts.items, alloc) catch |err| switch (err) {
+        var env = Env.init(alloc);
+        defer env.deinit();
+        env.run(stmts.items) catch |err| switch (err) {
             error.ValueError => {
                 stderr.print("ValueError\n", .{}) catch {};
                 std.process.exit(70);
