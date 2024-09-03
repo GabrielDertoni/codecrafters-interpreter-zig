@@ -903,7 +903,13 @@ pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
             defer inner.deinit();
             break :blk switch (payload.op) {
                 .neg => Value{ .number = -(try inner.assertNumber()) },
-                .not => Value{ .bool = !(try inner.assertBool()) },
+                .not => Value{
+                    .bool = switch (inner) {
+                        .nil => true, // nil is falsy
+                        .bool => |value| !value,
+                        else => false, // other stuff is truthy
+                    },
+                },
             };
         },
         .binary_op => |payload| blk: {
