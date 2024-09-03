@@ -1135,7 +1135,13 @@ pub fn main() !void {
     };
 
     if (command == .run) {
-        try run(stmts.items, alloc);
+        run(stmts.items, alloc) catch |err| switch (err) {
+            error.ValueError => {
+                stderr.print("ValueError\n", .{}) catch {};
+                std.process.exit(70);
+            },
+            else => return err,
+        };
     }
 }
 
