@@ -505,6 +505,7 @@ fn unquote(string: []const u8, allocator: Allocator) Allocator.Error!Cow([]const
 const Command = enum {
     tokenize,
     parse,
+    evaluate,
 
     pub fn parse(arg: []u8) error{UnknownCommand}!Command {
         if (std.mem.eql(u8, arg, "tokenize")) {
@@ -512,6 +513,9 @@ const Command = enum {
         }
         if (std.mem.eql(u8, arg, "parse")) {
             return .parse;
+        }
+        if (std.mem.eql(u8, arg, "evaluate")) {
+            return .evaluate;
         }
         return error.UnknownCommand;
     }
@@ -569,8 +573,8 @@ const Binary = enum {
 };
 
 const Expr = union(enum) {
-    bool: bool,
     nil,
+    bool: bool,
     number: f64,
     string: []const u8,
     group: *Expr,
@@ -822,20 +826,135 @@ const Parser = struct {
     }
 };
 
-pub fn print_parse_result(src: *const Source, result: Lexer.Result, allocator: Allocator) !void {
-    var stdout = std.io.getStdOut().writer();
-    if (result.erroed) {
-        std.process.exit(65);
-        return;
+const Utf8String = std.ArrayList(u8);
+const Utf8StringSlice = []const u8;
+
+const RuntimeError = error{
+    ValueError,
+} || Allocator.Error;
+
+const Value = union(enum) {
+    number: f64,
+    string: Utf8String,
+    bool: bool,
+    nil,
+
+    const Self = @This();
+
+    fn assertNumber(self: Self) RuntimeError!f64 {
+        return switch (self) {
+            .number => |value| value,
+            else => error.ValueError,
+        };
     }
-    const expr = Parser.parse(src, &result.tokens, allocator) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            // TODO: implement nice error messages
-            std.process.exit(65);
+
+    fn assertBool(self: Self) RuntimeError!bool {
+        return switch (self) {
+            .bool => |value| value,
+            else => error.ValueError,
+        };
+    }
+
+    fn assertString(self: Self) RuntimeError!Utf8StringSlice {
+        return switch (self) {
+            .string => |value| value.items,
+            else => error.ValueError,
+        };
+    }
+
+    fn deinit(self: Self) void {
+        switch (self) {
+            .string => |value| value.deinit(),
+            .number, .bool, .nil => {},
+        }
+    }
+
+    pub fn format(
+        self: Value,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        switch (self) {
+            // .number => |value| try print_number(writer, value),
+            .number => |value| try writer.print("{d}", .{value}),
+            .string => |value| try writer.print("{s}", .{value.items}),
+            .bool => |value| try writer.print("{}", .{value}),
+            .nil => try writer.print("nil", .{}),
+        }
+    }
+};
+
+pub fn evaluate(expr: *const Expr, allocator: Allocator) RuntimeError!Value {
+    return switch (expr.*) {
+        .nil => Value.nil,
+        .bool => |value| Value{ .bool = value },
+        .number => |value| Value{ .number = value },
+        .string => |value| blk: {
+            var string = Utf8String.init(allocator);
+            try string.appendSlice(value);
+            break :blk Value{ .string = string };
+        },
+        .group => |inner| evaluate(inner, allocator),
+        .unary_op => |payload| blk: {
+            const inner = try evaluate(payload.operand, allocator);
+            defer inner.deinit();
+            break :blk switch (payload.op) {
+                .neg => Value{ .number = -(try inner.assertNumber()) },
+                .not => Value{ .bool = !(try inner.assertBool()) },
+            };
+        },
+        .binary_op => |payload| blk: {
+            const lhs = try evaluate(payload.lhs, allocator);
+            defer lhs.deinit();
+            const rhs = try evaluate(payload.rhs, allocator);
+            defer rhs.deinit();
+            break :blk switch (payload.op) {
+                .plus => Value{ .number = (try lhs.assertNumber()) + (try rhs.assertNumber()) },
+                .minus => Value{ .number = (try lhs.assertNumber()) - (try rhs.assertNumber()) },
+                .times => Value{ .number = (try lhs.assertNumber()) * (try rhs.assertNumber()) },
+                .div => Value{ .number = (try lhs.assertNumber()) / (try rhs.assertNumber()) },
+                .lt => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = lhs_value < (try rhs.assertNumber()) },
+                    .bool => |lhs_value| Value{ .bool = !lhs_value and (try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()) == .lt },
+                    .nil => return error.ValueError,
+                },
+                .leq => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = lhs_value <= (try rhs.assertNumber()) },
+                    .bool => |lhs_value| Value{ .bool = !lhs_value or (try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.lte) },
+                    .nil => return error.ValueError,
+                },
+                .gt => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = lhs_value > (try rhs.assertNumber()) },
+                    .bool => |lhs_value| Value{ .bool = lhs_value and !(try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gt) },
+                    .nil => return error.ValueError,
+                },
+                .geq => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = lhs_value >= (try rhs.assertNumber()) },
+                    .bool => |lhs_value| Value{ .bool = lhs_value or !(try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.gte) },
+                    .nil => return error.ValueError,
+                },
+                .eq => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = std.math.approxEqAbs(f64, lhs_value, try rhs.assertNumber(), 1e-12) },
+                    .bool => |lhs_value| Value{ .bool = lhs_value == (try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.eq) },
+                    .nil => return error.ValueError,
+                },
+                .neq => switch (lhs) {
+                    .number => |lhs_value| Value{ .bool = !std.math.approxEqAbs(f64, lhs_value, try rhs.assertNumber(), 1e-12) },
+                    .bool => |lhs_value| Value{ .bool = lhs_value != (try rhs.assertBool()) },
+                    .string => |lhs_value| Value{ .bool = std.mem.order(u8, lhs_value.items, try rhs.assertString()).compare(.neq) },
+                    .nil => return error.ValueError,
+                },
+            };
         },
     };
-    try stdout.print("{s}\n", .{expr});
 }
 
 pub fn main() !void {
@@ -865,10 +984,34 @@ pub fn main() !void {
     defer alloc.free(src.contents);
 
     const lex_result = try Lexer.lex(&src, alloc);
+    if (command == .tokenize) {
+        try print_tokenize_result(&src, lex_result);
+        return;
+    }
 
-    switch (command) {
-        .tokenize => try print_tokenize_result(&src, lex_result),
-        .parse => try print_parse_result(&src, lex_result, alloc),
+    if (lex_result.erroed) {
+        std.process.exit(65);
+        return;
+    }
+
+    const tokens = lex_result.tokens;
+    const expr = Parser.parse(&src, &tokens, alloc) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => {
+            // TODO: implement nice error messages
+            std.process.exit(65);
+        },
+    };
+
+    var stdout = std.io.getStdOut().writer();
+    if (command == .parse) {
+        try stdout.print("{s}\n", .{expr});
+        return;
+    }
+
+    const value = try evaluate(expr, alloc);
+    if (command == .evaluate) {
+        try stdout.print("{}\n", .{value});
     }
 }
 
