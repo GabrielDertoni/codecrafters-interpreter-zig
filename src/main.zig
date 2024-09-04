@@ -1448,7 +1448,11 @@ pub fn main() !void {
         var env = Evaluator.init(alloc);
         defer env.deinit();
         env.run(stmts.items) catch |err| switch (err) {
-            error.ValueError => {
+            error.ValueError,
+            error.ValueError,
+            error.IoError,
+            error.VariableIsNotDeclared,
+            => {
                 stderr.print("ValueError\n", .{}) catch {};
                 std.process.exit(70);
             },
