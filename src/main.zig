@@ -3,6 +3,64 @@ const Allocator = std.mem.Allocator;
 
 const assert = std.debug.assert;
 
+fn FmtStr(comptime T: type) type {
+    return struct {
+        value: T,
+
+        pub fn format(
+            self: @This(),
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = options;
+            _ = fmt;
+            try writer.print("{s}", .{self.value});
+        }
+    };
+}
+
+fn fmtStr(value: anytype) FmtStr(@TypeOf(value)) {
+    return FmtStr(@TypeOf(value)){ .value = value };
+}
+
+fn FmtFields(comptime T: type) type {
+    return struct {
+        value: T,
+
+        pub fn format(
+            self: @This(),
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            _ = fmt;
+            _ = options;
+
+            const info = @typeInfo(T);
+            const new_fmt = comptime switch (info) {
+                .Struct => |struct_info| blk: {
+                    var f: []const u8 = "{{";
+                    for (0.., struct_info.fields) |i, field| {
+                        f = f ++ "." ++ field.name ++ " = {}";
+                        if (i != struct_info.fields.len - 1) {
+                            f = f ++ ", ";
+                        }
+                    }
+                    f = f ++ "}}";
+                    break :blk f;
+                },
+                else => @compileError("fmtFields can only work with struct"),
+            };
+            try writer.print(new_fmt, self.value);
+        }
+    };
+}
+
+fn fmtFields(value: anytype) FmtFields(@TypeOf(value)) {
+    return FmtFields(@TypeOf(value)){ .value = value };
+}
+
 const TokenKind = enum {
     lparen,
     rparen,
@@ -180,6 +238,7 @@ const Source = struct {
         }
 
         return Position{
+            .fname = self.fname,
             .line = line,
             .column = column,
         };
@@ -187,8 +246,20 @@ const Source = struct {
 };
 
 const Position = struct {
+    fname: []const u8,
     line: u32,
     column: u32,
+
+    pub fn format(
+        self: Position,
+        comptime fmt: []const u8,
+        options: std.fmt.FormatOptions,
+        writer: anytype,
+    ) !void {
+        _ = fmt;
+        _ = options;
+        try writer.print("{s}:{}:{}", .{ self.fname, self.line, self.column });
+    }
 };
 
 const keywords = std.StaticStringMap(TokenKind).initComptime(.{
@@ -564,6 +635,11 @@ const Unary = enum {
     not,
 };
 
+const Precedence = struct {
+    left_assoc: u8,
+    right_assoc: u8,
+};
+
 const Binary = enum {
     plus,
     minus,
@@ -576,11 +652,11 @@ const Binary = enum {
     eq,
     neq,
 
-    fn getPrecedence(self: Binary) u8 {
+    fn getPrecedence(self: Binary) Precedence {
         return switch (self) {
-            .lt, .leq, .gt, .geq, .eq, .neq => 1,
-            .plus, .minus => 2,
-            .times, .div => 3,
+            .lt, .leq, .gt, .geq, .eq, .neq => .{ .left_assoc = 4, .right_assoc = 5 },
+            .plus, .minus => .{ .left_assoc = 6, .right_assoc = 7 },
+            .times, .div => .{ .left_assoc = 8, .right_assoc = 9 },
         };
     }
 };
@@ -590,7 +666,7 @@ const Stmt = union(enum) {
     expr: *Expr,
     var_decl: struct {
         name: Symbol,
-        value: *Expr,
+        value: ?*Expr,
     },
 };
 
@@ -614,6 +690,10 @@ const Expr = union(enum) {
         rhs: *Expr,
     },
     var_ref: Symbol,
+    assign: struct {
+        target: Symbol,
+        value: *Expr,
+    },
 
     pub fn format(
         self: Expr,
@@ -652,7 +732,10 @@ const Expr = union(enum) {
                 try writer.print("({s} {} {})", .{ op, payload.lhs, payload.rhs });
             },
             .var_ref => |index| {
-                try writer.print("_var_{}", .{index});
+                try writer.print("{s}", .{g_interner.get(index).?});
+            },
+            .assign => |payload| {
+                try writer.print("(= {s} {})", .{ g_interner.get(payload.target).?, payload.value });
             },
         }
     }
@@ -687,13 +770,19 @@ const Interner = struct {
         }
         return result.value_ptr.*;
     }
+
+    pub fn get(self: *const Self, index: Index) ?[]const u8 {
+        return if (index < self.symbols.items.len) self.symbols.items[index] else null;
+    }
 };
+
+var g_interner: Interner = undefined;
 
 const Parser = struct {
     src: *const Source,
     tokens: *const Tokens,
     allocator: Allocator,
-    interner: Interner,
+    interner: *Interner,
     index: usize,
 
     const Error = error{
@@ -703,6 +792,7 @@ const Parser = struct {
         ExpectedIdent,
         ExpectedAssign,
         ExpectedRParen,
+        ExpressionCannotBeAssigned,
         UnexpectedToken,
         UnexpectedEof,
     } || Allocator.Error;
@@ -714,8 +804,7 @@ const Parser = struct {
             .src = src,
             .tokens = tokens,
             .allocator = allocator,
-            // TODO: figure out if I have to deinitialize this
-            .interner = Interner.init(allocator),
+            .interner = &g_interner,
             .index = 0,
         };
         self.skipCommentsAndWhitespace();
@@ -739,8 +828,7 @@ const Parser = struct {
             .src = src,
             .tokens = tokens,
             .allocator = allocator,
-            // TODO: figure out if I have to deinitialize this
-            .interner = Interner.init(allocator),
+            .interner = &g_interner,
             .index = 0,
         };
         self.skipCommentsAndWhitespace();
@@ -761,6 +849,11 @@ const Parser = struct {
             .keyword_var => {
                 self.advance();
                 const name = try self.expectIdent();
+                if (self.current() == .semi) {
+                    self.advance();
+                    // No assignment
+                    return Stmt{ .var_decl = .{ .name = name, .value = null } };
+                }
                 if (self.current() != .assign) {
                     return error.ExpectedAssign;
                 }
@@ -807,18 +900,45 @@ const Parser = struct {
                 .not_eq => .neq,
                 .leq => .leq,
                 .geq => .geq,
+                .assign => {
+                    // NOTE: this is a bit unfortunate. The way we're doing this it's just a lot easier to parse the lhs as
+                    // a full expression an then check it is what we expect. In the future we might be able to do something
+                    // smarter though.
+                    self.advance();
+                    defer self.allocator.destroy(lhs);
+                    const sym = switch (lhs.*) {
+                        .var_ref => |sym| sym,
+                        else => {
+                            std.log.err("expression cannot be assigned: {}", .{fmtFields(.{
+                                .target = lhs.*,
+                                .position = self.src.computePositionFromOffset(self.currentOffset()),
+                            })});
+                            return error.ExpressionCannotBeAssigned;
+                        },
+                    };
+                    const value = try self.parseExpr(0);
+                    // Lets just reuse the allocation!
+                    lhs.* = Expr{ .assign = .{ .target = sym, .value = value } };
+                    continue;
+                },
                 .eof, .rparen, .semi => break,
                 .comment, .whitespace => unreachable,
-                else => return error.ExpectedBinaryOperator,
+                else => |tok| {
+                    std.log.err("expected a binary operator: {}", .{fmtFields(.{
+                        .token = tok,
+                        .position = self.src.computePositionFromOffset(self.currentOffset()),
+                    })});
+                    return error.ExpectedBinaryOperator;
+                },
             };
 
             const prec = op.getPrecedence();
-            if (prec < min_prec) {
+            if (prec.left_assoc < min_prec) {
                 break;
             }
 
             self.advance();
-            const rhs = try self.parseExpr(prec + 1);
+            const rhs = try self.parseExpr(prec.right_assoc);
             const expr = try self.allocator.create(Expr);
             expr.* = Expr{ .binary_op = .{ .lhs = lhs, .op = op, .rhs = rhs } };
             lhs = expr;
@@ -930,7 +1050,13 @@ const Parser = struct {
                 .comment, .whitespace => unreachable,
                 .eof => return error.UnexpectedEof,
 
-                else => return error.UnexpectedToken,
+                else => |tok| {
+                    std.log.err("unexpected token: {}", .{fmtFields(.{
+                        .token = tok,
+                        .position = self.src.computePositionFromOffset(self.currentOffset()),
+                    })});
+                    return error.UnexpectedToken;
+                },
             }
         }
     }
@@ -954,6 +1080,10 @@ const Parser = struct {
 
     fn current(self: *const Self) TokenKind {
         return self.tokens.items(.kind)[self.index];
+    }
+
+    fn currentOffset(self: *const Self) u32 {
+        return self.tokens.items(.offset)[self.index];
     }
 
     fn currentText(self: *const Self) []const u8 {
@@ -1060,10 +1190,20 @@ const Env = struct {
     }
 
     pub fn lookup(self: *const Self, sym: Symbol) RuntimeError!Value {
+        const value_ptr = try self.lookupPtr(sym);
+        return value_ptr.clone();
+    }
+
+    pub fn lookupPtr(self: Self, sym: Symbol) RuntimeError!*Value {
         if (self.variables.getPtr(sym)) |value| {
-            return value.clone();
+            return value;
         }
         return error.VariableIsNotDeclared;
+    }
+
+    pub fn set(self: *Self, sym: Symbol, value: Value) RuntimeError!void {
+        const value_ptr = try self.lookupPtr(sym);
+        value_ptr.* = value;
     }
 };
 
@@ -1099,7 +1239,10 @@ const Evaluator = struct {
                     _ = try self.evaluate(expr);
                 },
                 .var_decl => |payload| {
-                    const value = try self.evaluate(payload.value);
+                    const value = if (payload.value) |expr|
+                        try self.evaluate(expr)
+                    else
+                        Value.nil;
                     try self.env.decl(payload.name, value);
                 },
             }
@@ -1183,6 +1326,11 @@ const Evaluator = struct {
                 };
             },
             .var_ref => |sym| try self.env.lookup(sym),
+            .assign => |payload| blk: {
+                const value = try self.evaluate(payload.value);
+                try self.env.set(payload.target, try value.clone());
+                break :blk value;
+            },
         };
     }
 };
@@ -1212,6 +1360,9 @@ fn compareBool(lhs: bool, rhs: bool) std.math.Order {
 }
 
 pub fn main() !void {
+    // Initialize stuff
+    g_interner = Interner.init(std.heap.page_allocator);
+
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     var alloc = arena.allocator();
