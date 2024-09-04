@@ -668,6 +668,7 @@ const Stmt = union(enum) {
         name: Symbol,
         value: ?*Expr,
     },
+    block: Stmts,
 };
 
 const Symbol = Interner.Index; // interned
@@ -792,6 +793,7 @@ const Parser = struct {
         ExpectedIdent,
         ExpectedAssign,
         ExpectedRParen,
+        ExpectedRBrace,
         ExpressionCannotBeAssigned,
         UnexpectedToken,
         UnexpectedEof,
@@ -808,19 +810,7 @@ const Parser = struct {
             .index = 0,
         };
         self.skipCommentsAndWhitespace();
-
-        // TODO: should probably use a different allocator? This may cause way too much fragmentation
-        // because of vector resizes.
-        var stmts = Stmts.init(self.allocator);
-        while (self.hasNext()) {
-            if (self.current() == .eof) {
-                break;
-            }
-            const stmt = try self.parseStmt();
-            try stmts.append(stmt);
-        }
-
-        return stmts;
+        return self.parseStmts();
     }
 
     pub fn parseSingleExpr(src: *const Source, tokens: *const Tokens, allocator: Allocator) Error!*Expr {
@@ -833,6 +823,21 @@ const Parser = struct {
         };
         self.skipCommentsAndWhitespace();
         return self.parseExpr(0);
+    }
+
+    fn parseStmts(self: *Self) Error!Stmts {
+        // TODO: should probably use a different allocator? This may cause way too much fragmentation
+        // because of vector resizes.
+        var stmts = Stmts.init(self.allocator);
+        while (self.hasNext()) {
+            const tok = self.current();
+            if (tok == .eof or tok == .rbrace) {
+                break;
+            }
+            const stmt = try self.parseStmt();
+            try stmts.append(stmt);
+        }
+        return stmts;
     }
 
     fn parseStmt(self: *Self) Error!Stmt {
@@ -864,6 +869,15 @@ const Parser = struct {
                 }
                 self.advance();
                 return Stmt{ .var_decl = .{ .name = name, .value = value } };
+            },
+            .lbrace => {
+                self.advance();
+                const stmts = try self.parseStmts();
+                if (self.current() != .rbrace) {
+                    return error.ExpectedRBrace;
+                }
+                self.advance();
+                return Stmt{ .block = stmts };
             },
             else => {
                 const expr = try self.parseExpr(0);
@@ -1178,6 +1192,7 @@ const Value = union(enum) {
 
 const Env = struct {
     variables: std.AutoHashMap(Symbol, Value),
+    super: ?*Env,
 
     const Self = @This();
 
@@ -1195,10 +1210,12 @@ const Env = struct {
     }
 
     pub fn lookupPtr(self: Self, sym: Symbol) RuntimeError!*Value {
-        if (self.variables.getPtr(sym)) |value| {
-            return value;
-        }
-        return error.VariableIsNotDeclared;
+        var this = self;
+        var next: ?*Env = &this;
+        return while (next) |curr| {
+            if (curr.variables.getPtr(sym)) |value| break value;
+            next = curr.super;
+        } else error.VariableIsNotDeclared;
     }
 
     pub fn set(self: *Self, sym: Symbol, value: Value) RuntimeError!void {
@@ -1217,6 +1234,7 @@ const Evaluator = struct {
         return Self{
             .env = Env{
                 .variables = std.AutoHashMap(Symbol, Value).init(allocator),
+                .super = null,
             },
             .allocator = allocator,
         };
@@ -1244,6 +1262,17 @@ const Evaluator = struct {
                     else
                         Value.nil;
                     try self.env.decl(payload.name, value);
+                },
+                .block => |blk_stmts| {
+                    var subEval = Evaluator{
+                        .env = Env{
+                            .variables = std.AutoHashMap(Symbol, Value).init(self.allocator),
+                            .super = &self.env,
+                        },
+                        .allocator = self.allocator,
+                    };
+                    defer subEval.env.variables.deinit();
+                    try subEval.run(blk_stmts.items);
                 },
             }
         }
