@@ -1105,7 +1105,7 @@ const Utf8StringSlice = []const u8;
 const RuntimeError = error{
     ValueError,
     IoError,
-    VariableAlreadyDeclared,
+    // VariableAlreadyDeclared,
     VariableIsNotDeclared,
 } || Allocator.Error;
 
@@ -1183,9 +1183,9 @@ const Env = struct {
 
     pub fn decl(self: *Self, sym: Symbol, value: Value) RuntimeError!void {
         const result = try self.variables.getOrPut(sym);
-        if (result.found_existing) {
-            return error.VariableAlreadyDeclared;
-        }
+        // if (result.found_existing) {
+        //     return error.VariableAlreadyDeclared;
+        // }
         result.value_ptr.* = value;
     }
 
