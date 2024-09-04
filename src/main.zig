@@ -1449,7 +1449,6 @@ pub fn main() !void {
         defer env.deinit();
         env.run(stmts.items) catch |err| switch (err) {
             error.ValueError,
-            error.ValueError,
             error.IoError,
             error.VariableIsNotDeclared,
             => {
